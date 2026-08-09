@@ -16,6 +16,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
+APP_VERSION = "0.6.0"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -384,6 +385,22 @@ def rule_kind(text):
     return "Rule"
 
 
+def display_filter_name(filter_id, list_name, rule_text):
+    name = str(list_name or "").strip()
+    lowered = name.casefold()
+    if str(filter_id) == "0" or lowered in {
+        "custom filtering rules",
+        "custom rules",
+        "user rules",
+        "user filtering rules",
+        "custom dns filter",
+    }:
+        return "Custom DNS filter"
+    if filter_id is None and str(rule_text or "").strip():
+        return "Custom DNS filter"
+    return name or "Filtering rule"
+
+
 def block_details(host, client_ip):
     names = filter_names()
     reasons = {}
@@ -438,6 +455,7 @@ def block_details(host, client_ip):
             list_name = ""
             if filter_id is not None:
                 list_name = names.get(str(filter_id), f"Filter #{filter_id}")
+            list_name = display_filter_name(filter_id, list_name, text)
 
             key = (list_name, text)
             item = rules.setdefault(key, {"list": list_name, "rule": text, "kind": rule_kind(text), "types": []})
@@ -461,16 +479,16 @@ def esc(value):
 
 
 CSS = r'''
-:root{color-scheme:light dark;--bg:#fff;--text:#1b1b1b;--muted:#737373;--line:#e1e1e1;--soft:#f7f7f7;--code:#f4f4f4;--accent:#a5231d}
-@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f0f0f0;--muted:#a6a6a6;--line:#363636;--soft:#1e1e1e;--code:#212121;--accent:#ff8d85}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(640px,100%);margin:0 auto;padding:max(26px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
-header{padding-bottom:17px;border-bottom:1px solid var(--line)}.title{margin:0;font-size:27px;line-height:1.08;letter-spacing:-.02em;font-weight:680}.lead{margin:6px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:13px;padding:8px 10px;background:var(--soft);border:1px solid var(--line);border-radius:7px;font:600 14.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-section{margin-top:18px}.section-title{margin:0 0 6px;font-size:13px;font-weight:680}.panel{border:1px solid var(--line);border-radius:8px;overflow:hidden}.row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;padding:7px 10px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:11.5px/1.42 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.rule{padding:9px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:7px 10px;align-items:center}.filter{font-weight:650}.meta{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:0 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;line-height:1.65;white-space:nowrap}.ruletext{margin-top:5px;padding:6px 8px;background:var(--code);border-radius:5px;font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.fallback{padding:9px 10px;border:1px solid var(--line);border-radius:8px}.dns{border-top:1px solid var(--line)}details{margin-top:18px;border-top:1px solid var(--line);padding-top:8px}summary{color:var(--muted);cursor:pointer;user-select:none;font-size:12px}.technical{margin-top:6px;color:var(--muted);font-size:11.5px;line-height:1.35;display:grid;gap:2px}.technical div{margin:0}.technical .mono{font-size:10.8px}.note{margin-top:14px;color:var(--muted);font-size:11.5px}.status{min-height:68vh;display:grid;align-content:center}.status header{border-bottom:0}
-@media(max-width:520px){main{padding-left:12px;padding-right:12px;padding-top:max(20px,env(safe-area-inset-top))}.title{font-size:24px}.row{grid-template-columns:76px minmax(0,1fr);gap:9px;padding:6px 8px}.rulehead{align-items:flex-start}.domain{font-size:13px}.panel{border-radius:7px}.mono{font-size:10.8px}.ruletext{font-size:10.8px}}
-@media(max-width:360px){.row{grid-template-columns:1fr;gap:1px}.meta{justify-content:flex-start}.rulehead{display:block}.meta{margin-top:4px}}
+:root{color-scheme:light dark;--bg:#fff;--text:#1b1b1b;--muted:#747474;--line:#e3e3e3;--soft:#f7f7f7;--code:#f4f4f4;--accent:#9d241e}
+@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#a8a8a8;--line:#353535;--soft:#1e1e1e;--code:#212121;--accent:#ff8e86}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:12px/1.32 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{width:min(600px,100%);margin:0 auto;padding:max(18px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) max(20px,env(safe-area-inset-bottom)) max(12px,env(safe-area-inset-left))}
+header{padding-bottom:10px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 2px;color:var(--muted);font-size:10.5px;font-weight:650}.title{margin:0;font-size:21px;line-height:1.08;letter-spacing:-.015em;font-weight:680}.lead{margin:3px 0 0;color:var(--muted)}.domain{margin-top:8px;padding:6px 8px;background:var(--soft);border:1px solid var(--line);border-radius:5px;font:600 12.5px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:12px}.section-title{margin:0 0 4px;font-size:12px;font-weight:680}.panel{border:1px solid var(--line);border-radius:6px;overflow:hidden}.row{display:grid;grid-template-columns:78px minmax(0,1fr);gap:8px;padding:5px 8px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:10.3px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:6px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:5px 8px;align-items:center;min-height:18px}.filter{font-weight:650;line-height:1.2}.meta{display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:0 4px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:9px;line-height:1.55;white-space:nowrap}.ruletext{margin-top:3px;padding:5px 7px;background:var(--code);border-radius:4px;font:10.3px/1.3 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.fallback{padding:6px 8px;border:1px solid var(--line);border-radius:6px}details{margin-top:11px;border-top:1px solid var(--line);padding-top:6px}summary{color:var(--muted);cursor:pointer;user-select:none;font-size:10.5px}.technical{margin-top:4px;color:var(--muted);font-size:10px;line-height:1.25;display:grid;gap:1px}.technical div{margin:0;overflow-wrap:anywhere}.technical .mono{font-size:9.6px}.note{margin-top:9px;color:var(--muted);font-size:10px}.status{min-height:60vh;display:grid;align-content:center}.status header{border-bottom:0}
+@media(max-width:520px){main{padding-left:10px;padding-right:10px;padding-top:max(14px,env(safe-area-inset-top))}.title{font-size:20px}.row{grid-template-columns:68px minmax(0,1fr);gap:6px;padding:4px 7px}.domain{font-size:11.5px}.mono,.ruletext{font-size:9.8px}.section-title{font-size:11.5px}}
+@media(max-width:340px){.row{grid-template-columns:1fr;gap:1px}.rulehead{align-items:flex-start}.meta{justify-content:flex-start}.rulehead{display:block}.meta{margin-top:3px}}
 '''
 
 
@@ -508,7 +526,7 @@ def render_blocked(host, device, details):
         device_rows.append(f'<div class="row"><div class="label">IPv6</div><div class="value mono">{esc(", ".join(ipv6))}</div></div>')
     if device.get("macs"):
         device_rows.append(f'<div class="row"><div class="label">MAC</div><div class="value mono">{esc(", ".join(device["macs"]))}</div></div>')
-    device_html = f'<section><h2 class="section-title">Device</h2><div class="panel">{"".join(device_rows)}</div></section>' if device_rows else ""
+    device_html = f'<section><h2 class="section-title">Device details</h2><div class="panel">{"".join(device_rows)}</div></section>' if device_rows else ""
 
     if details["rules"]:
         items = []
@@ -519,10 +537,10 @@ def render_blocked(host, device, details):
             badges = f'<span class="pill">{kind}</span>' + (f'<span class="pill">{qtypes}</span>' if qtypes else "")
             text = esc(item["rule"] or "Rule text unavailable")
             items.append(f'<div class="rule"><div class="rulehead"><div class="filter">{source}</div><div class="meta">{badges}</div></div><div class="ruletext">{text}</div></div>')
-        blocked_html = f'<section><h2 class="section-title">Blocked by</h2>{"".join(items)}</section>'
+        blocked_html = f'<section><h2 class="section-title">Why it was blocked</h2>{"".join(items)}</section>'
     else:
         reason = details["reasons"][0]["friendly"] if details["reasons"] else "Network filtering"
-        blocked_html = f'<section><h2 class="section-title">Blocked by</h2><div class="fallback">{esc(reason)}</div></section>'
+        blocked_html = f'<section><h2 class="section-title">Why it was blocked</h2><div class="fallback">{esc(reason)}</div></section>'
 
     dns_rows = []
     for item in details["services"]:
@@ -537,9 +555,9 @@ def render_blocked(host, device, details):
         suffix = types_text(item["types"])
         text = item["value"] + (f" · {suffix}" if suffix else "")
         dns_rows.append(f'<div class="row"><div class="label">Rewrite</div><div class="value mono">{esc(text)}</div></div>')
-    dns_html = f'<section><h2 class="section-title">DNS details</h2><div class="panel dns">{"".join(dns_rows)}</div></section>' if dns_rows else ""
+    dns_html = f'<section><h2 class="section-title">DNS details</h2><div class="panel">{"".join(dns_rows)}</div></section>' if dns_rows else ""
 
-    technical = []
+    technical = [f'<div>Version: <span class="mono">{esc(APP_VERSION)}</span></div>']
     current = device.get("current") or ""
     if full_name and short_name != full_name:
         technical.append(f'<div>Hostname: <span class="mono">{esc(full_name)}</span></div>')
@@ -550,10 +568,10 @@ def render_blocked(host, device, details):
             qtypes = types_text(reason["types"])
             suffix = f" · {qtypes}" if qtypes else ""
             technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
-    technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>' if technical else ""
+    technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><h1 class="title">Blocked</h1><p class="lead">This address was stopped by your network's DNS filtering.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -579,42 +597,43 @@ class Handler(BaseHTTPRequestHandler):
 
     def no_content(self):
         self.send_response(204)
-        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Cache-Control", "no-store, max-age=0")
         self.send_header("Content-Length", "0")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
 
-    def parse_request_target(self):
-        parsed = urllib.parse.urlsplit(self.path)
-        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
-        blocked = str((query.get("blocked") or [""])[0]).strip().lower().rstrip(".")
-        if len(blocked) > 253 or "/" in blocked or "\\" in blocked or is_ip(blocked):
-            blocked = ""
-        return parsed.path, blocked
-
     def do_GET(self):
-        path, blocked = self.parse_request_target()
+        path = urllib.parse.urlsplit(self.path).path
         if path == "/healthz":
             body = b'{"ok":true}'
             self.reply(200, body, "application/json")
-            try: self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError): pass
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
         if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content(); return
+            self.no_content()
+            return
+
         host = self.request_host()
         client_ip = normalize_ip(self.client_address[0])
-        if host and not is_ip(host): blocked = host
-        body = render_blocked(blocked, device_info(client_ip), block_details(blocked, client_ip)) if blocked else render_status(host or "block page")
+        if host and not is_ip(host):
+            body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
+        else:
+            body = render_status(host or "block page")
         self.reply(200, body, "text/html; charset=utf-8")
-        try: self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError): pass
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_HEAD(self):
-        path, blocked = self.parse_request_target()
+        path = urllib.parse.urlsplit(self.path).path
         if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content(); return
+            self.no_content()
+            return
         self.reply(200, b"", "text/html; charset=utf-8")
 
     def log_message(self, fmt, *args):

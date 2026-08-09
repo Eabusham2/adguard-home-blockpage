@@ -42,6 +42,13 @@ Never commit real AdGuard Home credentials to a public repository.
 
 Set DNS blocking mode to **Custom IP** and point blocked A/AAAA responses at the machine running this service. Port 80 must be reachable on that address.
 
+## Current behavior (v0.6.0)
+
+- Block pages render directly on the blocked HTTP hostname; the app does not emit HTTP redirects.
+- AdGuard custom/user rules are displayed as **Custom DNS filter**.
+- The UI is intentionally compact so device, rule, DNS, and expanded technical details fit in a small viewport.
+- Technical details include the running block-page version to make stale deployments easy to identify.
+
 ## HTTPS
 
 This is an HTTP block page. A transparent custom page for arbitrary HTTPS sites requires clients to trust an interception certificate; without that, HTTPS blocks normally fail certificate validation before an HTTP replacement page can be shown.
