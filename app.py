@@ -8,6 +8,7 @@ import re
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,7 +17,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.9.0"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -43,6 +44,7 @@ CACHE = {
     "filters": {},
     "clients_until": 0.0,
     "clients": [],
+    "block_details": {},
 }
 
 
@@ -54,13 +56,27 @@ def auth_headers():
     return headers
 
 
-def api_get(path, params=None):
+def api_get(path, params=None, timeout=3):
     url = AGH_URL + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers=auth_headers())
-    with urllib.request.urlopen(req, timeout=3) as response:
+    with urllib.request.urlopen(req, timeout=timeout) as response:
         return json.loads(response.read().decode())
+
+
+def api_error_text(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        detail = ""
+        try:
+            detail = exc.read(240).decode("utf-8", "replace").strip()
+        except Exception:
+            pass
+        text = f"HTTP {exc.code} {exc.reason}"
+        return f"{text}: {detail}" if detail else text
+    if isinstance(exc, urllib.error.URLError):
+        return f"Connection error: {exc.reason}"
+    return f"{type(exc).__name__}: {exc}"
 
 
 def api_post(path, payload):
@@ -346,14 +362,28 @@ def device_info(client_ip):
 
 
 def check_host(host, client_ip, qtype):
+    attempts = []
+    variants = [
+        {"name": host, "client": client_ip, "qtype": qtype},
+        {"name": host, "qtype": qtype},
+    ]
+    for params in variants:
+        try:
+            data = api_get("/control/filtering/check_host", params, timeout=2.5)
+            if isinstance(data, dict):
+                return data, attempts
+            attempts.append("Invalid JSON response")
+        except Exception as exc:
+            attempts.append(api_error_text(exc))
+    return {}, attempts
+
+
+def check_host_plain(host):
     try:
-        data = api_get(
-            "/control/filtering/check_host",
-            {"name": host, "client": client_ip, "qtype": qtype},
-        )
-        return data if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+        data = api_get("/control/filtering/check_host", {"name": host}, timeout=2.5)
+        return (data if isinstance(data, dict) else {}), []
+    except Exception as exc:
+        return {}, [api_error_text(exc)]
 
 
 def merge_types(existing, qtype):
@@ -409,11 +439,13 @@ def block_details(host, client_ip):
     cnames = {}
     rewrites = {}
     api_ok = False
+    api_errors = []
 
-    for qtype in ("A", "AAAA"):
-        data = check_host(host, client_ip, qtype)
-        if data:
-            api_ok = True
+    def ingest(data, qtype):
+        nonlocal api_ok
+        if not isinstance(data, dict) or not data:
+            return
+        api_ok = True
 
         raw_reason = str(data.get("reason") or "").strip()
         if raw_reason:
@@ -421,25 +453,31 @@ def block_details(host, client_ip):
                 raw_reason,
                 {"raw": raw_reason, "friendly": FRIENDLY_REASONS.get(raw_reason, raw_reason), "types": []},
             )
-            merge_types(item["types"], qtype)
+            if qtype:
+                merge_types(item["types"], qtype)
 
         service = str(data.get("service_name") or "").strip()
         if service:
             item = services.setdefault(service, {"value": service, "types": []})
-            merge_types(item["types"], qtype)
+            if qtype:
+                merge_types(item["types"], qtype)
 
         cname = str(data.get("cname") or "").strip()
         if cname:
             item = cnames.setdefault(cname, {"value": cname, "types": []})
-            merge_types(item["types"], qtype)
+            if qtype:
+                merge_types(item["types"], qtype)
 
         for address in data.get("ip_addrs", []) or []:
             address = normalize_ip(str(address))
             if address:
                 item = rewrites.setdefault(address, {"value": address, "types": []})
-                merge_types(item["types"], qtype)
+                if qtype:
+                    merge_types(item["types"], qtype)
 
         matched = data.get("rules") or []
+        if isinstance(matched, dict):
+            matched = [matched]
         if not matched and data.get("rule"):
             matched = [{"text": data.get("rule"), "filter_list_id": data.get("filter_id")}]
 
@@ -459,19 +497,57 @@ def block_details(host, client_ip):
 
             key = (list_name, text)
             item = rules.setdefault(key, {"list": list_name, "rule": text, "kind": rule_kind(text), "types": []})
-            merge_types(item["types"], qtype)
+            if qtype:
+                merge_types(item["types"], qtype)
+
+    for qtype in ("A", "AAAA"):
+        data, errors = check_host(host, client_ip, qtype)
+        for error in errors:
+            entry = f"{qtype}: {error}"
+            if entry not in api_errors:
+                api_errors.append(entry)
+        ingest(data, qtype)
+
+    # Older/newer AGH builds or a temporarily unhappy client-specific lookup can
+    # still answer the simple documented host check.  Use it only if both typed
+    # lookups failed so we do not duplicate normal results.
+    if not api_ok:
+        data, errors = check_host_plain(host)
+        for error in errors:
+            entry = f"plain: {error}"
+            if entry not in api_errors:
+                api_errors.append(entry)
+        ingest(data, "")
 
     if not reasons:
         reasons[""] = {"raw": "", "friendly": "Network filtering", "types": []}
 
-    return {
+    result = {
         "reasons": list(reasons.values()),
         "rules": list(rules.values()),
         "services": list(services.values()),
         "cnames": list(cnames.values()),
         "rewrites": list(rewrites.values()),
         "api_ok": api_ok,
+        "api_errors": api_errors[:4],
+        "stale": False,
     }
+
+    cache_key = host.casefold()
+    if api_ok:
+        CACHE["block_details"][cache_key] = {"time": time.time(), "data": result}
+        return result
+
+    cached = CACHE["block_details"].get(cache_key)
+    if cached and time.time() - cached.get("time", 0) <= 900:
+        saved = dict(cached.get("data") or {})
+        if saved:
+            saved["api_ok"] = False
+            saved["stale"] = True
+            saved["api_errors"] = api_errors[:4]
+            return saved
+
+    return result
 
 
 def esc(value):
@@ -570,8 +646,12 @@ def render_blocked(host, device, details):
             qtypes = types_text(reason["types"])
             suffix = f" · {qtypes}" if qtypes else ""
             technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
+    if details.get("stale"):
+        technical.append('<div>AdGuard API: <span class="mono">temporarily unavailable; showing last known match</span></div>')
+    for error in details.get("api_errors", []):
+        technical.append(f'<div>API error: <span class="mono">{esc(error)}</span></div>')
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
-    note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
+    note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
