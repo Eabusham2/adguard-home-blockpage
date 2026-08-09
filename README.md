@@ -6,13 +6,14 @@ A small HTTP block page for AdGuard Home, designed for Docker/Portainer and dual
 
 - IPv4 and IPv6 HTTP listener
 - Real client address with Docker host networking
-- Attempts to resolve the AdGuard client/device name from persistent clients, client search, and query-log metadata
-- Shows additional known client addresses, including a LAN IPv4 when AdGuard can associate it with the same client
+- Resolves the AdGuard client/device name from persistent clients, client search, query-log metadata, or reverse DNS when available
+- Shows associated IPv4 and IPv6 addresses; host-network ARP/NDP data can link a temporary IPv6 address back to the same LAN device
+- Shows the LAN MAC address only when it can be determined from AdGuard client IDs or the host neighbor table
 - Checks both A and AAAA filtering results
-- Shows every distinct **applied** rule/list returned by AdGuard Home
+- Shows every distinct **applied** rule/list returned by AdGuard Home and labels common rule forms (Domain, Wildcard, Regex, Hosts, DNS rewrite, CNAME rewrite, Adblock)
 - Shows blocked-service, CNAME, and rewrite-address data when AdGuard returns them
 - Automatic light/dark mode
-- Plain responsive UI with no JavaScript
+- Plain responsive system-style UI with no JavaScript, gradients, or decorative branding
 - Direct IP visits show a service-status page
 
 ## Important limitation about multiple blocklists

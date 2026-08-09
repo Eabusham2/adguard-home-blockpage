@@ -4,7 +4,9 @@ import html
 import ipaddress
 import json
 import os
+import re
 import socket
+import subprocess
 import time
 import urllib.parse
 import urllib.request
@@ -150,11 +152,66 @@ def address_set(client):
     return out
 
 
+def normalize_mac(value):
+    value = str(value or "").strip().lower().replace("-", ":")
+    if re.fullmatch(r"(?:[0-9a-f]{2}:){5}[0-9a-f]{2}", value):
+        return value
+    return ""
+
+
+def mac_ids(client):
+    out = []
+    for value in client.get("ids", []) or []:
+        mac = normalize_mac(value)
+        if mac and mac not in out:
+            out.append(mac)
+    return out
+
+
+def neighbor_entries():
+    found = []
+    seen = set()
+    for command in (["ip", "neigh", "show"], ["ip", "-6", "neigh", "show"]):
+        try:
+            output = subprocess.check_output(command, stderr=subprocess.DEVNULL, text=True, timeout=1.5)
+        except Exception:
+            continue
+        for line in output.splitlines():
+            parts = line.split()
+            if not parts:
+                continue
+            addr = normalize_ip(parts[0])
+            try:
+                idx = parts.index("lladdr")
+                mac = normalize_mac(parts[idx + 1])
+            except (ValueError, IndexError):
+                mac = ""
+            if is_ip(addr) and mac and (addr, mac) not in seen:
+                seen.add((addr, mac))
+                found.append((addr, mac))
+
+    try:
+        with open("/proc/net/arp", "r", encoding="utf-8", errors="ignore") as f:
+            next(f, None)
+            for line in f:
+                parts = line.split()
+                if len(parts) < 4:
+                    continue
+                addr = normalize_ip(parts[0])
+                mac = normalize_mac(parts[3])
+                if is_ip(addr) and mac and mac != "00:00:00:00:00:00" and (addr, mac) not in seen:
+                    seen.add((addr, mac))
+                    found.append((addr, mac))
+    except Exception:
+        pass
+    return found
+
+
 def find_client_by_ip(client_ip):
     client_ip = normalize_ip(client_ip)
     for client in client_catalog():
         values = {normalize_ip(x) for x in client.get("ip_addrs", [])}
-        values.update(normalize_ip(x) for x in client.get("ids", []))
+        values.update(normalize_ip(x) for x in client.get("ids", []) if is_ip(str(x)))
         if client_ip in values:
             return client
     return None
@@ -208,7 +265,6 @@ def name_from_querylog(client_ip):
         logged_ip = normalize_ip(str(entry.get("client") or ""))
         if logged_ip and logged_ip != client_ip:
             continue
-
         info = entry.get("client_info")
         if isinstance(info, dict):
             name = str(info.get("name") or "").strip()
@@ -222,36 +278,69 @@ def name_from_querylog(client_ip):
 
 def device_info(client_ip):
     client_ip = normalize_ip(client_ip)
-    info = {"name": "", "current": client_ip, "addresses": [client_ip] if client_ip else []}
+    info = {"name": "", "current": client_ip, "addresses": [], "macs": []}
 
+    def add_address(value):
+        value = normalize_ip(value)
+        if is_ip(value) and value not in info["addresses"]:
+            info["addresses"].append(value)
+
+    def add_mac(value):
+        value = normalize_mac(value)
+        if value and value not in info["macs"]:
+            info["macs"].append(value)
+
+    add_address(client_ip)
     client = find_client_by_ip(client_ip)
     if client:
         info["name"] = str(client.get("name") or "").strip()
         for address in address_set(client):
-            if address not in info["addresses"]:
-                info["addresses"].append(address)
-        return info
+            add_address(address)
+        for mac in mac_ids(client):
+            add_mac(mac)
 
-    name = name_from_clients_search(client_ip)
-    if not name:
-        name = name_from_querylog(client_ip)
+    neighbors = neighbor_entries()
+    current_macs = [mac for addr, mac in neighbors if addr == client_ip]
+    for mac in current_macs:
+        add_mac(mac)
+        for addr, neighbor_mac in neighbors:
+            if neighbor_mac == mac:
+                add_address(addr)
 
-    if name:
-        info["name"] = name
-        client = find_client_by_name(name)
-        if client:
-            for address in address_set(client):
-                if address not in info["addresses"]:
-                    info["addresses"].append(address)
-        return info
+    for address in list(info["addresses"]):
+        candidate = find_client_by_ip(address)
+        if candidate:
+            if not info["name"]:
+                info["name"] = str(candidate.get("name") or "").strip()
+            for extra in address_set(candidate):
+                add_address(extra)
+            for mac in mac_ids(candidate):
+                add_mac(mac)
 
-    try:
-        host = socket.gethostbyaddr(client_ip)[0].rstrip(".")
-        if host and host != client_ip:
-            info["name"] = host
-    except Exception:
-        pass
+    if not info["name"]:
+        for address in list(info["addresses"]):
+            name = name_from_clients_search(address) or name_from_querylog(address)
+            if name:
+                info["name"] = name
+                break
 
+    if info["name"]:
+        candidate = find_client_by_name(info["name"])
+        if candidate:
+            for address in address_set(candidate):
+                add_address(address)
+            for mac in mac_ids(candidate):
+                add_mac(mac)
+
+    if not info["name"]:
+        for address in list(info["addresses"]):
+            try:
+                host = socket.gethostbyaddr(address)[0].rstrip(".")
+                if host and host != address:
+                    info["name"] = host
+                    break
+            except Exception:
+                pass
     return info
 
 
@@ -269,6 +358,30 @@ def check_host(host, client_ip, qtype):
 def merge_types(existing, qtype):
     if qtype not in existing:
         existing.append(qtype)
+
+
+def rule_kind(text):
+    text = str(text or "").strip()
+    lower = text.lower()
+    if not text:
+        return "Rule"
+    if "$dnsrewrite" in lower:
+        if re.search(r"(?:^|[;,])\s*cname\s*(?:[;,]|$)", lower):
+            return "CNAME rewrite"
+        return "DNS rewrite"
+    if len(text) >= 2 and text.startswith("/") and text.rfind("/") > 0:
+        return "Regex"
+    if re.match(r"^(?:\d{1,3}\.){3}\d{1,3}\s+\S+", text) or re.match(r"^[0-9a-fA-F:]+\s+\S+", text):
+        return "Hosts"
+    if "*" in text:
+        return "Wildcard"
+    if re.fullmatch(r"(?:@@)?\|\|[^*^/$|]+\^", text):
+        return "Domain"
+    if text.startswith("||") or text.startswith("@@") or any(ch in text for ch in "^$|"):
+        return "Adblock"
+    if re.fullmatch(r"[A-Za-z0-9_.-]+", text):
+        return "Exact"
+    return "Rule"
 
 
 def block_details(host, client_ip):
@@ -327,7 +440,7 @@ def block_details(host, client_ip):
                 list_name = names.get(str(filter_id), f"Filter #{filter_id}")
 
             key = (list_name, text)
-            item = rules.setdefault(key, {"list": list_name, "rule": text, "types": []})
+            item = rules.setdefault(key, {"list": list_name, "rule": text, "kind": rule_kind(text), "types": []})
             merge_types(item["types"], qtype)
 
     if not reasons:
@@ -348,15 +461,15 @@ def esc(value):
 
 
 CSS = r'''
-:root{color-scheme:light dark;--bg:#fff;--text:#171717;--muted:#666;--line:#dedede;--soft:#f5f5f5;--accent:#b42318}
-@media(prefers-color-scheme:dark){:root{--bg:#151515;--text:#f1f1f1;--muted:#aaa;--line:#3a3a3a;--soft:#202020;--accent:#ff8b82}}
+:root{color-scheme:light dark;--bg:#fff;--text:#181818;--muted:#707070;--line:#dedede;--code:#f4f4f4;--danger:#9d1b16}
+@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f0f0f0;--muted:#a7a7a7;--line:#3b3b3b;--code:#222;--danger:#ff8a82}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(640px,100%);margin:0 auto;padding:max(36px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(36px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
-h1{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 22px;color:var(--muted)}.domain{margin:0 0 24px;padding:12px 14px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font-weight:650;overflow-wrap:anywhere}
-.info{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:650}.address{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-h2{margin:26px 0 8px;font-size:16px}.rule{padding:11px 0;border-top:1px solid var(--line)}.rule:first-of-type{border-top:0}.filter{font-weight:650}.rtype{margin-left:7px;color:var(--muted);font-size:12px;font-weight:400}.ruletext{margin-top:3px;color:var(--muted);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-details{margin-top:24px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;color:var(--muted);user-select:none}.technical{margin-top:10px;color:var(--muted);font-size:13px}.technical div{margin:4px 0;overflow-wrap:anywhere}.note{margin-top:20px;color:var(--muted);font-size:13px}
-@media(max-width:500px){main{padding-left:14px;padding-right:14px}.row{grid-template-columns:1fr;gap:3px}h1{font-size:27px}}
+main{width:min(720px,100%);margin:0 auto;padding:max(40px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(44px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+header{padding-bottom:24px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 7px;color:var(--danger);font-size:13px;font-weight:650}.title{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:22px;font:600 18px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:28px}h2{margin:0 0 8px;font-size:15px;font-weight:650}.info{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:130px minmax(0,1fr);gap:18px;padding:11px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:600}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:13px 0;border-top:1px solid var(--line)}.rule:first-of-type{border-top:0}.rulehead{display:flex;gap:8px 12px;align-items:baseline;flex-wrap:wrap}.filter{font-weight:600}.meta{color:var(--muted);font-size:12px}.ruletext{margin-top:5px;padding:9px 10px;background:var(--code);border-radius:4px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+details{margin-top:28px;border-top:1px solid var(--line);padding-top:13px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:9px;color:var(--muted);font-size:13px}.technical div{margin:4px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:70dvh;display:grid;align-content:center}.status header{border-bottom:0}
+@media(max-width:520px){main{padding-left:16px;padding-right:16px}.title{font-size:27px}.row{grid-template-columns:1fr;gap:2px}.domain{font-size:16px}.ruletext{margin-left:-2px;margin-right:-2px}}
 '''
 
 
@@ -365,80 +478,62 @@ def types_text(types):
 
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main><h1>Block page</h1><p class="lead">The service is running.</p><div class="domain">{esc(host)}</div></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><p class="eyebrow">Block page</p><h1 class="title">Service is running</h1><p class="lead">AdGuard Home can redirect blocked HTTP destinations to this address.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
     primary_reason = details["reasons"][0]["friendly"]
-
-    rows = [
-        f'<div class="row"><div class="label">Reason</div><div class="value"><strong>{esc(primary_reason)}</strong></div></div>'
-    ]
+    rows = [f'<div class="row"><div class="label">Reason</div><div class="value"><strong>{esc(primary_reason)}</strong></div></div>']
 
     if device.get("name"):
-        rows.append(
-            f'<div class="row"><div class="label">Device</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>'
-        )
+        rows.append(f'<div class="row"><div class="label">Device</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>')
 
-    current = device.get("current") or ""
-    if current:
-        kind = "IPv6 address" if ":" in current else "IPv4 address"
-        rows.append(
-            f'<div class="row"><div class="label">{kind}</div><div class="value address">{esc(current)}</div></div>'
-        )
-
-    extras_v4 = [a for a in device.get("addresses", []) if a != current and ":" not in a]
-    extras_v6 = [a for a in device.get("addresses", []) if a != current and ":" in a]
-    if extras_v4:
-        rows.append(
-            f'<div class="row"><div class="label">Local IPv4</div><div class="value address">{esc(", ".join(extras_v4))}</div></div>'
-        )
-    if extras_v6:
-        rows.append(
-            f'<div class="row"><div class="label">Other IPv6</div><div class="value address">{esc(", ".join(extras_v6))}</div></div>'
-        )
+    ipv4 = [a for a in device.get("addresses", []) if ":" not in a]
+    ipv6 = [a for a in device.get("addresses", []) if ":" in a]
+    if ipv4:
+        rows.append(f'<div class="row"><div class="label">IPv4</div><div class="value mono">{esc(", ".join(ipv4))}</div></div>')
+    if ipv6:
+        rows.append(f'<div class="row"><div class="label">IPv6</div><div class="value mono">{esc(", ".join(ipv6))}</div></div>')
+    if device.get("macs"):
+        rows.append(f'<div class="row"><div class="label">MAC</div><div class="value mono">{esc(", ".join(device["macs"]))}</div></div>')
 
     for item in details["services"]:
-        rows.append(
-            f'<div class="row"><div class="label">Service</div><div class="value">{esc(item["value"])}</div></div>'
-        )
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        rows.append(f'<div class="row"><div class="label">Service</div><div class="value">{esc(text)}</div></div>')
     for item in details["cnames"]:
-        rows.append(
-            f'<div class="row"><div class="label">CNAME</div><div class="value address">{esc(item["value"])}</div></div>'
-        )
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        rows.append(f'<div class="row"><div class="label">CNAME</div><div class="value mono">{esc(text)}</div></div>')
     for item in details["rewrites"]:
-        rows.append(
-            f'<div class="row"><div class="label">Rewrite address</div><div class="value address">{esc(item["value"])}</div></div>'
-        )
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        rows.append(f'<div class="row"><div class="label">Rewrite</div><div class="value mono">{esc(text)}</div></div>')
 
     rules_html = ""
     if details["rules"]:
-        label = "Matched rule" if len(details["rules"]) == 1 else f'Matched rules ({len(details["rules"])})'
+        heading = "Matched rule" if len(details["rules"]) == 1 else f'Matched rules ({len(details["rules"])})'
         items = []
         for item in details["rules"]:
             source = esc(item["list"] or "Filtering rule")
-            qtypes = types_text(item["types"])
-            type_badge = f'<span class="rtype">{esc(qtypes)}</span>' if qtypes else ""
+            meta = " · ".join(x for x in (item.get("kind", "Rule"), types_text(item["types"])) if x)
             text = esc(item["rule"] or "Rule text unavailable")
-            items.append(
-                f'<div class="rule"><div class="filter">{source}{type_badge}</div><div class="ruletext">{text}</div></div>'
-            )
-        rules_html = f'<section><h2>{esc(label)}</h2>{"".join(items)}</section>'
+            items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{source}</span><span class="meta">{esc(meta)}</span></div><div class="ruletext">{text}</div></div>')
+        rules_html = f'<section><h2>{esc(heading)}</h2>{"".join(items)}</section>'
 
     technical = []
+    current = device.get("current") or ""
+    if current:
+        technical.append(f'<div>Connection source: <span class="mono">{esc(current)}</span></div>')
     for reason in details["reasons"]:
         if reason["raw"]:
             qtypes = types_text(reason["types"])
-            suffix = f" ({qtypes})" if qtypes else ""
-            technical.append(f'<div>AdGuard reason: <span class="address">{esc(reason["raw"] + suffix)}</span></div>')
-    if technical:
-        technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
-    else:
-        technical_html = ""
-
+            suffix = f" · {qtypes}" if qtypes else ""
+            technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
+    technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>' if technical else ""
     note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#151515"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><h1>Blocked</h1><p class="lead">This address is blocked by your network.</p><div class="domain">{esc(host)}</div><section class="info">{"".join(rows)}</section>{rules_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#171717"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">Blocked by DNS filtering</p><h1 class="title">This address is blocked</h1><p class="lead">Your network stopped this destination before a connection was made.</p><div class="domain">{esc(host)}</div></header><section><h2>Details</h2><div class="info">{"".join(rows)}</div></section>{rules_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
