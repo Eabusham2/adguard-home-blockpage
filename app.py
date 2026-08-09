@@ -1,5 +1,13 @@
 #!/usr/bin/env python3
-import base64, html, ipaddress, json, os, socket, time, urllib.parse, urllib.request
+import base64
+import html
+import ipaddress
+import json
+import os
+import socket
+import time
+import urllib.parse
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
@@ -7,19 +15,17 @@ AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
 
-REASONS = {
-    "NotFilteredNotFound": "No filtering rule matched",
-    "NotFilteredWhiteList": "Allowed by an exception rule",
-    "NotFilteredError": "Filtering check error",
-    "FilteredBlackList": "Blocked by a DNS blocklist",
-    "FilteredSafeBrowsing": "Blocked by Safe Browsing",
-    "FilteredParental": "Blocked by parental controls",
-    "FilteredInvalid": "Blocked because the request is invalid",
-    "FilteredSafeSearch": "Safe Search was enforced",
+FRIENDLY_REASONS = {
+    "FilteredBlackList": "DNS blocklist",
+    "FilteredSafeBrowsing": "Safe Browsing",
+    "FilteredParental": "Parental controls",
+    "FilteredInvalid": "Invalid destination",
+    "FilteredSafeSearch": "Safe Search",
     "FilteredBlockedService": "Blocked service",
     "Rewrite": "DNS rewrite",
     "RewriteEtcHosts": "Hosts-file rewrite",
     "RewriteRule": "DNS rewrite rule",
+    "NotFilteredWhiteList": "Allowlist exception",
 }
 SPECIAL_LISTS = {
     "0": "Custom filtering rules",
@@ -29,219 +35,467 @@ SPECIAL_LISTS = {
     "-4": "Safe Browsing",
     "-5": "Safe Search",
 }
-CACHE = {"filters_t": 0, "filters": {}, "clients_t": 0, "clients": {}}
+CACHE = {
+    "filters_until": 0.0,
+    "filters": {},
+    "clients_until": 0.0,
+    "clients": [],
+}
 
-def headers():
-    h = {"Accept": "application/json"}
+
+def auth_headers():
+    headers = {"Accept": "application/json"}
     if AGH_USERNAME:
         token = base64.b64encode(f"{AGH_USERNAME}:{AGH_PASSWORD}".encode()).decode()
-        h["Authorization"] = f"Basic {token}"
-    return h
+        headers["Authorization"] = f"Basic {token}"
+    return headers
+
 
 def api_get(path, params=None):
     url = AGH_URL + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    with urllib.request.urlopen(urllib.request.Request(url, headers=headers()), timeout=3) as r:
-        return json.loads(r.read().decode())
+    req = urllib.request.Request(url, headers=auth_headers())
+    with urllib.request.urlopen(req, timeout=3) as response:
+        return json.loads(response.read().decode())
+
 
 def api_post(path, payload):
-    h = headers()
-    h["Content-Type"] = "application/json"
-    req = urllib.request.Request(AGH_URL + path, data=json.dumps(payload).encode(), headers=h, method="POST")
-    with urllib.request.urlopen(req, timeout=3) as r:
-        return json.loads(r.read().decode())
+    headers = auth_headers()
+    headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(
+        AGH_URL + path,
+        data=json.dumps(payload).encode(),
+        headers=headers,
+        method="POST",
+    )
+    with urllib.request.urlopen(req, timeout=3) as response:
+        return json.loads(response.read().decode())
 
-def norm_ip(v):
-    v = (v or "").split("%", 1)[0]
+
+def normalize_ip(value):
+    value = (value or "").strip().split("%", 1)[0]
     try:
-        ip = ipaddress.ip_address(v)
-        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
-            return str(ip.ipv4_mapped)
-        return str(ip)
+        addr = ipaddress.ip_address(value)
+        if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped:
+            return str(addr.ipv4_mapped)
+        return str(addr)
     except ValueError:
-        return v
+        return value
 
-def is_ip(v):
+
+def is_ip(value):
     try:
-        ipaddress.ip_address((v or "").split("%", 1)[0])
+        ipaddress.ip_address((value or "").split("%", 1)[0])
         return True
     except ValueError:
         return False
 
+
 def filter_names():
     now = time.time()
-    if CACHE["filters_t"] > now:
+    if CACHE["filters_until"] > now:
         return CACHE["filters"]
+
     names = dict(SPECIAL_LISTS)
     try:
-        data = api_get("/control/filtering/status")
+        status = api_get("/control/filtering/status")
         for section in ("filters", "whitelist_filters"):
-            for item in data.get(section, []) or []:
-                if item.get("id") is not None and item.get("name"):
-                    names[str(item["id"])] = str(item["name"])
+            for item in status.get(section, []) or []:
+                filter_id = item.get("id")
+                name = item.get("name")
+                if filter_id is not None and name:
+                    names[str(filter_id)] = str(name)
     except Exception:
         pass
-    CACHE["filters"], CACHE["filters_t"] = names, now + 300
+
+    CACHE["filters"] = names
+    CACHE["filters_until"] = now + 300
     return names
 
-def client_name(ip):
-    ip = norm_ip(ip)
-    try:
-        data = api_post("/control/clients/search", {"clients": [{"id": ip}]})
-        if isinstance(data, list):
-            for entry in data:
-                if isinstance(entry, dict):
-                    for info in entry.values():
-                        if isinstance(info, dict) and info.get("name"):
-                            return str(info["name"])
-    except Exception:
-        pass
+
+def client_catalog():
     now = time.time()
-    if CACHE["clients_t"] <= now:
-        names = {}
-        try:
-            data = api_get("/control/clients")
-            for item in data.get("clients", []) or []:
-                n = str(item.get("name") or "").strip()
-                for ident in item.get("ids", []) or []:
-                    if n:
-                        names[norm_ip(str(ident))] = n
-            for item in data.get("auto_clients", []) or []:
-                addr = norm_ip(str(item.get("ip") or ""))
-                n = str(item.get("name") or "").strip()
-                if addr and n:
-                    names[addr] = n
-        except Exception:
-            pass
-        CACHE["clients"], CACHE["clients_t"] = names, now + 120
-    if CACHE["clients"].get(ip):
-        return CACHE["clients"][ip]
+    if CACHE["clients_until"] > now:
+        return CACHE["clients"]
+
+    catalog = []
     try:
-        n = socket.gethostbyaddr(ip)[0].rstrip(".")
-        if n and n != ip:
-            return n
+        data = api_get("/control/clients")
+        for item in data.get("clients", []) or []:
+            name = str(item.get("name") or "").strip()
+            ids = [str(x).strip() for x in item.get("ids", []) or [] if str(x).strip()]
+            ip_addrs = [normalize_ip(str(x)) for x in item.get("ip_addrs", []) or [] if str(x).strip()]
+            catalog.append({"name": name, "ids": ids, "ip_addrs": ip_addrs})
+
+        for item in data.get("auto_clients", []) or []:
+            ip = normalize_ip(str(item.get("ip") or ""))
+            name = str(item.get("name") or "").strip()
+            if ip or name:
+                catalog.append({"name": name, "ids": [ip] if ip else [], "ip_addrs": [ip] if ip else []})
     except Exception:
         pass
+
+    CACHE["clients"] = catalog
+    CACHE["clients_until"] = now + 120
+    return catalog
+
+
+def address_set(client):
+    out = []
+    for value in list(client.get("ip_addrs", [])) + list(client.get("ids", [])):
+        value = normalize_ip(str(value))
+        if is_ip(value) and value not in out:
+            out.append(value)
+    return out
+
+
+def find_client_by_ip(client_ip):
+    client_ip = normalize_ip(client_ip)
+    for client in client_catalog():
+        values = {normalize_ip(x) for x in client.get("ip_addrs", [])}
+        values.update(normalize_ip(x) for x in client.get("ids", []))
+        if client_ip in values:
+            return client
+    return None
+
+
+def find_client_by_name(name):
+    if not name:
+        return None
+    target = name.casefold().rstrip(".")
+    for client in client_catalog():
+        candidate = str(client.get("name") or "").casefold().rstrip(".")
+        if candidate and candidate == target:
+            return client
+    return None
+
+
+def name_from_clients_search(client_ip):
+    try:
+        data = api_post("/control/clients/search", {"clients": [{"id": client_ip}]})
+    except Exception:
+        return ""
+
+    def walk(value):
+        if isinstance(value, dict):
+            if str(value.get("name") or "").strip():
+                return str(value["name"]).strip()
+            for nested in value.values():
+                found = walk(nested)
+                if found:
+                    return found
+        elif isinstance(value, list):
+            for nested in value:
+                found = walk(nested)
+                if found:
+                    return found
+        return ""
+
+    return walk(data)
+
+
+def name_from_querylog(client_ip):
+    try:
+        data = api_get("/control/querylog", {"search": client_ip, "limit": 50})
+    except Exception:
+        return ""
+
+    entries = data.get("data", []) if isinstance(data, dict) else []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        logged_ip = normalize_ip(str(entry.get("client") or ""))
+        if logged_ip and logged_ip != client_ip:
+            continue
+
+        info = entry.get("client_info")
+        if isinstance(info, dict):
+            name = str(info.get("name") or "").strip()
+            if name:
+                return name
+        name = str(entry.get("client_name") or "").strip()
+        if name:
+            return name
     return ""
 
-def check(host, client, qtype):
+
+def device_info(client_ip):
+    client_ip = normalize_ip(client_ip)
+    info = {"name": "", "current": client_ip, "addresses": [client_ip] if client_ip else []}
+
+    client = find_client_by_ip(client_ip)
+    if client:
+        info["name"] = str(client.get("name") or "").strip()
+        for address in address_set(client):
+            if address not in info["addresses"]:
+                info["addresses"].append(address)
+        return info
+
+    name = name_from_clients_search(client_ip)
+    if not name:
+        name = name_from_querylog(client_ip)
+
+    if name:
+        info["name"] = name
+        client = find_client_by_name(name)
+        if client:
+            for address in address_set(client):
+                if address not in info["addresses"]:
+                    info["addresses"].append(address)
+        return info
+
     try:
-        d = api_get("/control/filtering/check_host", {"name": host, "client": client, "qtype": qtype})
-        return d if isinstance(d, dict) else {}
+        host = socket.gethostbyaddr(client_ip)[0].rstrip(".")
+        if host and host != client_ip:
+            info["name"] = host
+    except Exception:
+        pass
+
+    return info
+
+
+def check_host(host, client_ip, qtype):
+    try:
+        data = api_get(
+            "/control/filtering/check_host",
+            {"name": host, "client": client_ip, "qtype": qtype},
+        )
+        return data if isinstance(data, dict) else {}
     except Exception:
         return {}
 
-def details(host, client):
+
+def merge_types(existing, qtype):
+    if qtype not in existing:
+        existing.append(qtype)
+
+
+def block_details(host, client_ip):
     names = filter_names()
-    results = {q: check(host, client, q) for q in ("A", "AAAA")}
-    reasons, matches, services, cnames, rewrite_ips = {}, {}, {}, {}, {}
-    for qtype, d in results.items():
-        reason = str(d.get("reason") or "")
-        if reason:
-            item = reasons.setdefault(reason, {"text": REASONS.get(reason, reason), "qtypes": set()})
-            item["qtypes"].add(qtype)
-        service = str(d.get("service_name") or "").strip()
+    reasons = {}
+    rules = {}
+    services = {}
+    cnames = {}
+    rewrites = {}
+    api_ok = False
+
+    for qtype in ("A", "AAAA"):
+        data = check_host(host, client_ip, qtype)
+        if data:
+            api_ok = True
+
+        raw_reason = str(data.get("reason") or "").strip()
+        if raw_reason:
+            item = reasons.setdefault(
+                raw_reason,
+                {"raw": raw_reason, "friendly": FRIENDLY_REASONS.get(raw_reason, raw_reason), "types": []},
+            )
+            merge_types(item["types"], qtype)
+
+        service = str(data.get("service_name") or "").strip()
         if service:
-            services.setdefault(service, set()).add(qtype)
-        cname = str(d.get("cname") or "").strip()
+            item = services.setdefault(service, {"value": service, "types": []})
+            merge_types(item["types"], qtype)
+
+        cname = str(data.get("cname") or "").strip()
         if cname:
-            cnames.setdefault(cname, set()).add(qtype)
-        for addr in d.get("ip_addrs", []) or []:
-            addr = str(addr or "").strip()
-            if addr:
-                rewrite_ips.setdefault(addr, set()).add(qtype)
-        rules = d.get("rules") or []
-        if not rules and d.get("rule"):
-            rules = [{"text": d.get("rule"), "filter_list_id": d.get("filter_id")}]
-        for rule in rules:
+            item = cnames.setdefault(cname, {"value": cname, "types": []})
+            merge_types(item["types"], qtype)
+
+        for address in data.get("ip_addrs", []) or []:
+            address = normalize_ip(str(address))
+            if address:
+                item = rewrites.setdefault(address, {"value": address, "types": []})
+                merge_types(item["types"], qtype)
+
+        matched = data.get("rules") or []
+        if not matched and data.get("rule"):
+            matched = [{"text": data.get("rule"), "filter_list_id": data.get("filter_id")}]
+
+        for rule in matched:
             if isinstance(rule, str):
-                text, fid = rule, None
+                text, filter_id = rule, None
             elif isinstance(rule, dict):
-                text = str(rule.get("text") or rule.get("rule") or "")
-                fid = rule.get("filter_list_id", rule.get("filter_id"))
+                text = str(rule.get("text") or rule.get("rule") or "").strip()
+                filter_id = rule.get("filter_list_id", rule.get("filter_id"))
             else:
                 continue
-            list_name = names.get(str(fid), f"Filter #{fid}") if fid is not None else ""
-            matches.setdefault((list_name, text), set()).add(qtype)
+
+            list_name = ""
+            if filter_id is not None:
+                list_name = names.get(str(filter_id), f"Filter #{filter_id}")
+
+            key = (list_name, text)
+            item = rules.setdefault(key, {"list": list_name, "rule": text, "types": []})
+            merge_types(item["types"], qtype)
+
+    if not reasons:
+        reasons[""] = {"raw": "", "friendly": "Network filtering", "types": []}
+
     return {
-        "reasons": [{"code": code, "text": v["text"], "qtypes": sorted(v["qtypes"])} for code, v in reasons.items()] or [{"code": "", "text": "Blocked by network filtering", "qtypes": []}],
-        "matches": [{"list": k[0], "rule": k[1], "qtypes": sorted(qtypes)} for k, qtypes in matches.items()],
-        "services": [{"name": name, "qtypes": sorted(qtypes)} for name, qtypes in services.items()],
-        "cnames": [{"value": value, "qtypes": sorted(qtypes)} for value, qtypes in cnames.items()],
-        "rewrite_ips": [{"value": value, "qtypes": sorted(qtypes)} for value, qtypes in rewrite_ips.items()],
-        "api_ok": any(bool(x) for x in results.values()),
+        "reasons": list(reasons.values()),
+        "rules": list(rules.values()),
+        "services": list(services.values()),
+        "cnames": list(cnames.values()),
+        "rewrites": list(rewrites.values()),
+        "api_ok": api_ok,
     }
 
+
+def esc(value):
+    return html.escape(str(value), quote=True)
+
+
 CSS = r'''
-:root{color-scheme:light dark;--bg:#f6f6f3;--card:#fff;--text:#20201e;--muted:#70706b;--line:#deded8;--soft:#f0f0ec;--red:#b42318;--btn:#20201e;--bt:#fff}
-@media(prefers-color-scheme:dark){:root{--bg:#111210;--card:#1a1b19;--text:#f1f1ed;--muted:#a4a49d;--line:#343530;--soft:#242521;--red:#ff9188;--btn:#efefe9;--bt:#171715}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;min-width:280px;min-height:100vh;min-height:100dvh;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(720px,100%);margin:auto;padding:max(32px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(32px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:clamp(22px,5vw,36px)}.k{margin:0 0 8px;color:var(--red);font-size:12px;font-weight:750;letter-spacing:.055em;text-transform:uppercase}h1{margin:0;font-size:clamp(30px,7vw,43px);line-height:1.08;letter-spacing:-.025em}.intro{margin:12px 0 23px;color:var(--muted);font-size:16px;line-height:1.5}.domain{padding:14px 15px;background:var(--soft);border:1px solid var(--line);border-radius:10px;font-size:clamp(16px,4vw,19px);font-weight:650;overflow-wrap:anywhere}.summary{margin-top:23px;border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:125px minmax(0,1fr);gap:16px;padding:14px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted);font-size:14px}.value{min-width:0;overflow-wrap:anywhere}.dn{font-weight:650}.dip{margin-top:3px;color:var(--muted);font-size:13px}.matches{margin-top:25px}.matches h2{margin:0 0 9px;font-size:16px}.match{padding:13px 0;border-top:1px solid var(--line)}.ml{font-weight:650}.rule{margin-top:5px;color:var(--muted);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}.note{margin:17px 0 0;color:var(--muted);font-size:13px;line-height:1.45}.tag{display:inline-block;margin-left:7px;padding:2px 6px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;font-weight:600;vertical-align:1px}code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.9em}button{margin-top:25px;min-height:44px;padding:10px 17px;border:0;border-radius:9px;background:var(--btn);color:var(--bt);font:inherit;font-weight:650;cursor:pointer}.status{min-height:calc(100dvh - 64px);display:grid;align-content:center}@media(max-width:520px){main{padding-left:12px;padding-right:12px}.card{padding:21px 17px;border-radius:13px}.row{grid-template-columns:1fr;gap:4px}}@media(min-width:1000px){main{padding-top:8vh}}
+:root{color-scheme:light dark;--bg:#fff;--text:#171717;--muted:#666;--line:#dedede;--soft:#f5f5f5;--accent:#b42318}
+@media(prefers-color-scheme:dark){:root{--bg:#151515;--text:#f1f1f1;--muted:#aaa;--line:#3a3a3a;--soft:#202020;--accent:#ff8b82}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{width:min(640px,100%);margin:0 auto;padding:max(36px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(36px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
+h1{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 22px;color:var(--muted)}.domain{margin:0 0 24px;padding:12px 14px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font-weight:650;overflow-wrap:anywhere}
+.info{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:120px minmax(0,1fr);gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:650}.address{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+h2{margin:26px 0 8px;font-size:16px}.rule{padding:11px 0;border-top:1px solid var(--line)}.rule:first-of-type{border-top:0}.filter{font-weight:650}.rtype{margin-left:7px;color:var(--muted);font-size:12px;font-weight:400}.ruletext{margin-top:3px;color:var(--muted);font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+details{margin-top:24px;border-top:1px solid var(--line);padding-top:14px}summary{cursor:pointer;color:var(--muted);user-select:none}.technical{margin-top:10px;color:var(--muted);font-size:13px}.technical div{margin:4px 0;overflow-wrap:anywhere}.note{margin-top:20px;color:var(--muted);font-size:13px}
+@media(max-width:500px){main{padding-left:14px;padding-right:14px}.row{grid-template-columns:1fr;gap:3px}h1{font-size:27px}}
 '''
 
-def esc(v): return html.escape(str(v), quote=True)
-def page_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><section class="card"><p class="k">Block page</p><h1>Service is running</h1><p class="intro">Blocked HTTP destinations can be redirected here by AdGuard Home.</p><div class="domain">{esc(host)}</div></section></main></body></html>'''.encode()
-def qt(qtypes): return " + ".join(qtypes) if qtypes else ""
-def page_blocked(host, ip, name, d):
-    reason_parts=[]
-    for item in d["reasons"]:
-        label=esc(item["text"]); tech=[]
-        if item["code"]: tech.append(esc(item["code"]))
-        if item["qtypes"]: tech.append(esc(qt(item["qtypes"])))
-        if tech: label += '<div class="dip">' + " · ".join(tech) + '</div>'
-        reason_parts.append(label)
-    reasons="<br>".join(reason_parts)
-    device=f'<div class="dn">{esc(name) if name else "Unknown device"}</div><div class="dip">{esc(ip)}</div>'
-    extra=""
-    for item in d["services"]:
-        q=f' <span class="tag">{esc(qt(item["qtypes"]))}</span>' if item["qtypes"] else ""
-        extra += f'<div class="row"><div class="label">Blocked service</div><div class="value">{esc(item["name"])}{q}</div></div>'
-    for item in d["cnames"]:
-        q=f' <span class="tag">{esc(qt(item["qtypes"]))}</span>' if item["qtypes"] else ""
-        extra += f'<div class="row"><div class="label">CNAME rewrite</div><div class="value"><code>{esc(item["value"])}</code>{q}</div></div>'
-    if d["rewrite_ips"]:
-        parts=[]
-        for item in d["rewrite_ips"]:
-            q=f' <span class="tag">{esc(qt(item["qtypes"]))}</span>' if item["qtypes"] else ""
-            parts.append(f'<code>{esc(item["value"])}</code>{q}')
-        extra += f'<div class="row"><div class="label">IP rewrite</div><div class="value">{"<br>".join(parts)}</div></div>'
-    match_html=""
-    if d["matches"]:
-        rows=[]
-        for item in d["matches"]:
-            list_name=esc(item["list"] or "Filtering rule"); rule=esc(item["rule"] or "Rule text unavailable")
-            q=f'<span class="tag">{esc(qt(item["qtypes"]))}</span>' if item["qtypes"] else ""
-            rows.append(f'<div class="match"><div class="ml">{list_name}{q}</div><div class="rule">{rule}</div></div>')
-        match_html=f'<section class="matches"><h2>Matched rules ({len(d["matches"])})</h2>{"".join(rows)}</section>'
-    note="" if d["api_ok"] else '<p class="note">Detailed filter information is temporarily unavailable.</p>'
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Blocked - {esc(host)}</title><style>{CSS}</style></head><body><main><section class="card"><p class="k">Access blocked</p><h1>This site is blocked</h1><p class="intro">The address was stopped by this network's DNS filtering.</p><div class="domain">{esc(host)}</div><div class="summary"><div class="row"><div class="label">Reason</div><div class="value">{reasons}</div></div>{extra}<div class="row"><div class="label">Device</div><div class="value">{device}</div></div></div>{match_html}{note}<button type="button" onclick="history.length>1?history.back():location.replace('about:blank')">Go back</button></section></main></body></html>'''.encode()
+
+def types_text(types):
+    return " + ".join(types)
+
+
+def render_status(host):
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main><h1>Block page</h1><p class="lead">The service is running.</p><div class="domain">{esc(host)}</div></main></body></html>'''.encode()
+
+
+def render_blocked(host, device, details):
+    primary_reason = details["reasons"][0]["friendly"]
+
+    rows = [
+        f'<div class="row"><div class="label">Reason</div><div class="value"><strong>{esc(primary_reason)}</strong></div></div>'
+    ]
+
+    if device.get("name"):
+        rows.append(
+            f'<div class="row"><div class="label">Device</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>'
+        )
+
+    current = device.get("current") or ""
+    if current:
+        kind = "IPv6 address" if ":" in current else "IPv4 address"
+        rows.append(
+            f'<div class="row"><div class="label">{kind}</div><div class="value address">{esc(current)}</div></div>'
+        )
+
+    extras_v4 = [a for a in device.get("addresses", []) if a != current and ":" not in a]
+    extras_v6 = [a for a in device.get("addresses", []) if a != current and ":" in a]
+    if extras_v4:
+        rows.append(
+            f'<div class="row"><div class="label">Local IPv4</div><div class="value address">{esc(", ".join(extras_v4))}</div></div>'
+        )
+    if extras_v6:
+        rows.append(
+            f'<div class="row"><div class="label">Other IPv6</div><div class="value address">{esc(", ".join(extras_v6))}</div></div>'
+        )
+
+    for item in details["services"]:
+        rows.append(
+            f'<div class="row"><div class="label">Service</div><div class="value">{esc(item["value"])}</div></div>'
+        )
+    for item in details["cnames"]:
+        rows.append(
+            f'<div class="row"><div class="label">CNAME</div><div class="value address">{esc(item["value"])}</div></div>'
+        )
+    for item in details["rewrites"]:
+        rows.append(
+            f'<div class="row"><div class="label">Rewrite address</div><div class="value address">{esc(item["value"])}</div></div>'
+        )
+
+    rules_html = ""
+    if details["rules"]:
+        label = "Matched rule" if len(details["rules"]) == 1 else f'Matched rules ({len(details["rules"])})'
+        items = []
+        for item in details["rules"]:
+            source = esc(item["list"] or "Filtering rule")
+            qtypes = types_text(item["types"])
+            type_badge = f'<span class="rtype">{esc(qtypes)}</span>' if qtypes else ""
+            text = esc(item["rule"] or "Rule text unavailable")
+            items.append(
+                f'<div class="rule"><div class="filter">{source}{type_badge}</div><div class="ruletext">{text}</div></div>'
+            )
+        rules_html = f'<section><h2>{esc(label)}</h2>{"".join(items)}</section>'
+
+    technical = []
+    for reason in details["reasons"]:
+        if reason["raw"]:
+            qtypes = types_text(reason["types"])
+            suffix = f" ({qtypes})" if qtypes else ""
+            technical.append(f'<div>AdGuard reason: <span class="address">{esc(reason["raw"] + suffix)}</span></div>')
+    if technical:
+        technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
+    else:
+        technical_html = ""
+
+    note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
+
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#151515"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><h1>Blocked</h1><p class="lead">This address is blocked by your network.</p><div class="domain">{esc(host)}</div><section class="info">{"".join(rows)}</section>{rules_html}{technical_html}{note}</main></body></html>'''.encode()
+
 
 class Handler(BaseHTTPRequestHandler):
-    def host(self):
-        h=(self.headers.get("Host") or "").strip()
-        if h.startswith("[") and "]" in h: return h[1:h.index("]")].lower().rstrip(".")
-        return h.split(":",1)[0].lower().rstrip(".")
-    def common(self, code, body, ctype):
-        self.send_response(code); self.send_header("Content-Type",ctype); self.send_header("Content-Length",str(len(body))); self.send_header("Cache-Control","no-store,max-age=0"); self.send_header("X-Content-Type-Options","nosniff"); self.send_header("X-Frame-Options","DENY"); self.send_header("Referrer-Policy","no-referrer"); self.send_header("Content-Security-Policy","default-src 'none';style-src 'unsafe-inline';script-src 'unsafe-inline';base-uri 'none';frame-ancestors 'none'"); self.end_headers()
+    def request_host(self):
+        value = (self.headers.get("Host") or "").strip()
+        if value.startswith("[") and "]" in value:
+            return value[1:value.index("]")].lower().rstrip(".")
+        return value.split(":", 1)[0].lower().rstrip(".")
+
+    def reply(self, code, body, content_type):
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+        self.end_headers()
+
     def do_GET(self):
-        if self.path=="/healthz":
-            body=b'{"ok":true}'; self.common(200,body,"application/json"); self.wfile.write(body); return
-        h=self.host()
-        if not h or is_ip(h):
-            body=page_status(h or "block page"); self.common(200,body,"text/html;charset=utf-8"); self.wfile.write(body); return
-        ip=norm_ip(self.client_address[0]); body=page_blocked(h,ip,client_name(ip),details(h,ip)); self.common(451,body,"text/html;charset=utf-8"); self.wfile.write(body)
+        if self.path == "/healthz":
+            body = b'{"ok":true}'
+            self.reply(200, body, "application/json")
+            self.wfile.write(body)
+            return
+
+        host = self.request_host()
+        if not host or is_ip(host):
+            body = render_status(host or "block page")
+            self.reply(200, body, "text/html; charset=utf-8")
+            self.wfile.write(body)
+            return
+
+        client_ip = normalize_ip(self.client_address[0])
+        body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
+        self.reply(200, body, "text/html; charset=utf-8")
+        self.wfile.write(body)
+
     def do_HEAD(self):
-        if self.path=="/healthz": self.common(200,b"","application/json"); return
-        h=self.host(); self.common(200 if (not h or is_ip(h)) else 451,b"","text/html;charset=utf-8")
-    def log_message(self,fmt,*args): print(f"{norm_ip(self.client_address[0])} - {fmt % args}",flush=True)
+        self.reply(200, b"", "text/html; charset=utf-8")
+
+    def log_message(self, fmt, *args):
+        print(f"{normalize_ip(self.client_address[0])} - {fmt % args}", flush=True)
+
 
 class DualStackServer(ThreadingHTTPServer):
-    address_family=socket.AF_INET6; daemon_threads=True; allow_reuse_address=True
+    address_family = socket.AF_INET6
+    daemon_threads = True
+    allow_reuse_address = True
+
     def server_bind(self):
-        try: self.socket.setsockopt(socket.IPPROTO_IPV6,socket.IPV6_V6ONLY,0)
-        except OSError: pass
+        try:
+            self.socket.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
         super().server_bind()
 
-DualStackServer(("::",PORT),Handler).serve_forever()
+
+DualStackServer(("::", PORT), Handler).serve_forever()
