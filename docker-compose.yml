@@ -1,0 +1,20 @@
+services:
+  blockpage:
+    build: .
+    container_name: adguard-home-blockpage
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      AGH_URL: "${AGH_URL}"
+      AGH_USERNAME: "${AGH_USERNAME}"
+      AGH_PASSWORD: "${AGH_PASSWORD}"
+      PORT: "80"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE

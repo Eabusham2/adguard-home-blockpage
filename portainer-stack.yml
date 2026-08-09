@@ -1,0 +1,29 @@
+services:
+  blockpage:
+    image: python:3.13-alpine
+    container_name: adguard-home-blockpage
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - sh
+      - -c
+      - wget -qO /tmp/app.py https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/main/app.py && python /tmp/app.py
+    environment:
+      AGH_URL: "${AGH_URL}"
+      AGH_USERNAME: "${AGH_USERNAME}"
+      AGH_PASSWORD: "${AGH_PASSWORD}"
+      PORT: "80"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - NET_BIND_SERVICE
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
