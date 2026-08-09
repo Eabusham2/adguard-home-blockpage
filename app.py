@@ -17,7 +17,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
-APP_VERSION = "0.9.3"
+APP_VERSION = "0.9.4"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -45,6 +45,7 @@ CACHE = {
     "clients_until": 0.0,
     "clients": [],
     "block_details": {},
+    "user_rules": [],
 }
 
 
@@ -56,13 +57,30 @@ def auth_headers():
     return headers
 
 
-def api_get(path, params=None, timeout=3):
-    url = AGH_URL + path
+def api_bases():
+    bases = ["http://127.0.0.1:3000", AGH_URL.rstrip("/")]
+    out = []
+    for base in bases:
+        if base and base not in out:
+            out.append(base)
+    return out
+
+
+def api_get(path, params=None, timeout=2.0):
+    suffix = path
     if params:
-        url += "?" + urllib.parse.urlencode(params)
-    req = urllib.request.Request(url, headers=auth_headers())
-    with urllib.request.urlopen(req, timeout=timeout) as response:
-        return json.loads(response.read().decode())
+        suffix += "?" + urllib.parse.urlencode(params)
+    last_error = None
+    for base in api_bases():
+        try:
+            req = urllib.request.Request(base + suffix, headers=auth_headers())
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No AdGuard API endpoint configured")
 
 
 def api_error_text(exc):
@@ -79,18 +97,25 @@ def api_error_text(exc):
     return f"{type(exc).__name__}: {exc}"
 
 
-def api_post(path, payload):
+def api_post(path, payload, timeout=2.0):
     headers = auth_headers()
     headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(
-        AGH_URL + path,
-        data=json.dumps(payload).encode(),
-        headers=headers,
-        method="POST",
-    )
-    with urllib.request.urlopen(req, timeout=3) as response:
-        return json.loads(response.read().decode())
-
+    last_error = None
+    for base in api_bases():
+        try:
+            req = urllib.request.Request(
+                base + path,
+                data=json.dumps(payload).encode(),
+                headers=headers,
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode())
+        except Exception as exc:
+            last_error = exc
+    if last_error is not None:
+        raise last_error
+    raise RuntimeError("No AdGuard API endpoint configured")
 
 def normalize_ip(value):
     value = (value or "").strip().split("%", 1)[0]
@@ -118,13 +143,15 @@ def filter_names():
 
     names = dict(SPECIAL_LISTS)
     try:
-        status = api_get("/control/filtering/status")
+        status = api_get("/control/filtering/status", timeout=2.0)
         for section in ("filters", "whitelist_filters"):
             for item in status.get(section, []) or []:
                 filter_id = item.get("id")
                 name = item.get("name")
                 if filter_id is not None and name and str(filter_id) != "0":
                     names[str(filter_id)] = str(name)
+        rules = status.get("user_rules", []) or []
+        CACHE["user_rules"] = [str(x).strip() for x in rules if str(x).strip()]
     except Exception:
         pass
 
@@ -132,6 +159,10 @@ def filter_names():
     CACHE["filters_until"] = now + 300
     return names
 
+
+def user_filter_rules():
+    filter_names()
+    return list(CACHE.get("user_rules") or [])
 
 def client_catalog():
     now = time.time()
@@ -361,6 +392,81 @@ def device_info(client_ip):
     return info
 
 
+def custom_rule_matches_host(rule, host):
+    raw = str(rule or "").strip()
+    host = str(host or "").strip().lower().rstrip(".")
+    if not raw or not host or raw.startswith(("!", "#", "@@")):
+        return False
+
+    # Hosts-file style custom rules.
+    parts = raw.split()
+    if len(parts) >= 2 and is_ip(parts[0]):
+        return any(str(x).lower().rstrip(".") == host for x in parts[1:])
+
+    # Regex custom rules.
+    if raw.startswith("/"):
+        last = raw.rfind("/")
+        if last > 0:
+            try:
+                return re.search(raw[1:last], host, re.I) is not None
+            except re.error:
+                return False
+
+    body = raw.split("$", 1)[0].strip()
+    if body.startswith("||"):
+        body = body[2:]
+        body = re.split(r"[\^/|]", body, maxsplit=1)[0]
+        body = body.strip(".").lower()
+        if not body:
+            return False
+        if "*" in body:
+            pattern = "^" + re.escape(body).replace(r"\*", ".*") + "$"
+            return re.match(pattern, host, re.I) is not None
+        return host == body or host.endswith("." + body)
+
+    body = body.strip("|").strip().lower().rstrip(".")
+    if "*" in body:
+        pattern = "^" + re.escape(body).replace(r"\*", ".*") + "$"
+        return re.match(pattern, host, re.I) is not None
+    return body == host
+
+
+def custom_rule_types(rule):
+    lower = str(rule or "").lower()
+    m = re.search(r"(?:^|[,;$])dnstype=([^,$]+)", lower)
+    if not m:
+        return ["A", "AAAA"]
+    value = m.group(1).upper()
+    out = []
+    if "A" in value.split("|"):
+        out.append("A")
+    if "AAAA" in value.split("|"):
+        out.append("AAAA")
+    return out or ["A", "AAAA"]
+
+
+def querylog_matches(host, client_ip):
+    errors = []
+    try:
+        data = api_get("/control/querylog", {"search": f'"{host}"', "limit": 50}, timeout=2.0)
+    except Exception as exc:
+        return [], [api_error_text(exc)]
+    entries = data.get("data", []) if isinstance(data, dict) else []
+    exact = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        question = entry.get("question") or {}
+        qhost = str(question.get("host") or question.get("name") or "").lower().rstrip(".")
+        if qhost != host.lower().rstrip("."):
+            continue
+        qtype = str(question.get("type") or "").upper()
+        logged_client = normalize_ip(str(entry.get("client") or ""))
+        score = 1 if logged_client and logged_client == normalize_ip(client_ip) else 0
+        exact.append((score, qtype, entry))
+    exact.sort(key=lambda x: x[0], reverse=True)
+    return exact[:8], errors
+
 def check_host(host, client_ip, qtype):
     attempts = []
     variants = [
@@ -441,47 +547,39 @@ def block_details(host, client_ip):
     rewrites = {}
     api_ok = False
     api_errors = []
+    detail_source = "check_host"
 
     def ingest(data, qtype):
         nonlocal api_ok
         if not isinstance(data, dict) or not data:
             return
         api_ok = True
-
         raw_reason = str(data.get("reason") or "").strip()
         if raw_reason:
-            item = reasons.setdefault(
-                raw_reason,
-                {"raw": raw_reason, "friendly": FRIENDLY_REASONS.get(raw_reason, raw_reason), "types": []},
-            )
+            item = reasons.setdefault(raw_reason, {"raw": raw_reason, "friendly": FRIENDLY_REASONS.get(raw_reason, raw_reason), "types": []})
             if qtype:
                 merge_types(item["types"], qtype)
-
         service = str(data.get("service_name") or "").strip()
         if service:
             item = services.setdefault(service, {"value": service, "types": []})
             if qtype:
                 merge_types(item["types"], qtype)
-
         cname = str(data.get("cname") or "").strip()
         if cname:
             item = cnames.setdefault(cname, {"value": cname, "types": []})
             if qtype:
                 merge_types(item["types"], qtype)
-
         for address in data.get("ip_addrs", []) or []:
             address = normalize_ip(str(address))
             if address:
                 item = rewrites.setdefault(address, {"value": address, "types": []})
                 if qtype:
                     merge_types(item["types"], qtype)
-
         matched = data.get("rules") or []
         if isinstance(matched, dict):
             matched = [matched]
         if not matched and data.get("rule"):
             matched = [{"text": data.get("rule"), "filter_list_id": data.get("filter_id")}]
-
         for rule in matched:
             if isinstance(rule, str):
                 text, filter_id = rule, None
@@ -490,12 +588,8 @@ def block_details(host, client_ip):
                 filter_id = rule.get("filter_list_id", rule.get("filter_id"))
             else:
                 continue
-
-            list_name = ""
-            if filter_id is not None:
-                list_name = names.get(str(filter_id), f"Filter #{filter_id}")
+            list_name = names.get(str(filter_id), f"Filter #{filter_id}") if filter_id is not None else ""
             list_name = display_filter_name(filter_id, list_name, text)
-
             key = (list_name, text)
             item = rules.setdefault(key, {"list": list_name, "rule": text, "kind": rule_kind(text), "types": []})
             if qtype:
@@ -509,9 +603,6 @@ def block_details(host, client_ip):
                 api_errors.append(entry)
         ingest(data, qtype)
 
-    # Older/newer AGH builds or a temporarily unhappy client-specific lookup can
-    # still answer the simple documented host check.  Use it only if both typed
-    # lookups failed so we do not duplicate normal results.
     if not api_ok:
         data, errors = check_host_plain(host)
         for error in errors:
@@ -520,25 +611,51 @@ def block_details(host, client_ip):
                 api_errors.append(entry)
         ingest(data, "")
 
+    # The DNS query necessarily happened before this HTTP block page loaded.
+    # If check_host was temporarily unavailable, recover the exact logged reason/rule.
+    if not rules or not api_ok:
+        logged, errors = querylog_matches(host, client_ip)
+        for error in errors:
+            entry = f"querylog: {error}"
+            if entry not in api_errors:
+                api_errors.append(entry)
+        if logged:
+            detail_source = "querylog"
+            for _, qtype, entry in logged:
+                ingest(entry, qtype if qtype in ("A", "AAAA") else "")
+
+    # AdGuard may report only one winning block-list rule even when the same host
+    # also matches a user rule.  Explicitly surface matching user rules as Custom rule.
+    custom_found = False
+    for text in user_filter_rules():
+        if not custom_rule_matches_host(text, host):
+            continue
+        custom_found = True
+        key = ("Custom rule", text)
+        item = rules.setdefault(key, {"list": "Custom rule", "rule": text, "kind": rule_kind(text), "types": []})
+        for qtype in custom_rule_types(text):
+            merge_types(item["types"], qtype)
+    if custom_found and not any(r.get("raw") for r in reasons.values()):
+        reasons["FilteredBlackList"] = {"raw": "FilteredBlackList", "friendly": "DNS blocklist", "types": ["A", "AAAA"]}
+
     if not reasons:
         reasons[""] = {"raw": "", "friendly": "Network filtering", "types": []}
 
     result = {
         "reasons": list(reasons.values()),
-        "rules": list(rules.values()),
+        "rules": sorted(rules.values(), key=lambda x: (0 if x.get("list") == "Custom rule" else 1, x.get("list", ""), x.get("rule", ""))),
         "services": list(services.values()),
         "cnames": list(cnames.values()),
         "rewrites": list(rewrites.values()),
-        "api_ok": api_ok,
+        "api_ok": api_ok or bool(rules),
         "api_errors": api_errors[:4],
         "stale": False,
+        "detail_source": detail_source,
     }
-
     cache_key = host.casefold()
-    if api_ok:
+    if result["api_ok"]:
         CACHE["block_details"][cache_key] = {"time": time.time(), "data": result}
         return result
-
     cached = CACHE["block_details"].get(cache_key)
     if cached and time.time() - cached.get("time", 0) <= 900:
         saved = dict(cached.get("data") or {})
@@ -547,9 +664,7 @@ def block_details(host, client_ip):
             saved["stale"] = True
             saved["api_errors"] = api_errors[:4]
             return saved
-
     return result
-
 
 def esc(value):
     return html.escape(str(value), quote=True)
@@ -586,9 +701,10 @@ def display_device_name(name):
 
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b3261e"/><path d="M18 21h28v7H18zm0 15h28v7H18z" fill="#fff"/></svg>'
 FAVICON_ICO = base64.b64decode("AAABAAEAICAAAAEAIACKAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAgAAAAIAgGAAAAc3p69AAAAFFJREFUeNpjYEADm9Xk/tMSM+ACtLYYr0PobTmGIwbUAQNlOdwRow4YdcCgdgC1wKgDhq4DRnPBqANGC6JRB4wWRKMOGBkOGO0ZDYrO6UB2zwEghr0ZTmJhtQAAAABJRU5ErkJggg==")
+FAVICON_DATA_URI = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNiMzI2MWUiLz48cGF0aCBkPSJNMTggMjFoMjh2N0gxOHptMCAxNWgyOHY3SDE4eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=="
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><link rel="shortcut icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
@@ -648,6 +764,8 @@ def render_blocked(host, device, details):
             qtypes = types_text(reason["types"])
             suffix = f" · {qtypes}" if qtypes else ""
             technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
+    if details.get("detail_source") == "querylog":
+        technical.append('<div>Rule source: <span class="mono">query log fallback</span></div>')
     if details.get("stale"):
         technical.append('<div>AdGuard API: <span class="mono">temporarily unavailable; showing last known match</span></div>')
     for error in details.get("api_errors", []):
@@ -655,7 +773,7 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><link rel="shortcut icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -674,7 +792,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Expires", "0")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'self'; connect-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
