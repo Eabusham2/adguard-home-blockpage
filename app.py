@@ -17,7 +17,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -32,7 +32,7 @@ FRIENDLY_REASONS = {
     "NotFilteredWhiteList": "Allowlist exception",
 }
 SPECIAL_LISTS = {
-    "0": "Custom DNS filter",
+    "0": "Custom rule",
     "-1": "System hosts file",
     "-2": "Blocked services",
     "-3": "Parental controls",
@@ -424,10 +424,11 @@ def display_filter_name(filter_id, list_name, rule_text):
         "user rules",
         "user filtering rules",
         "custom dns filter",
+        "custom rule",
     }:
-        return "Custom DNS filter"
+        return "Custom rule"
     if filter_id is None and str(rule_text or "").strip():
-        return "Custom DNS filter"
+        return "Custom rule"
     return name or "Filtering rule"
 
 
@@ -584,6 +585,7 @@ def display_device_name(name):
 
 
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b3261e"/><path d="M18 21h28v7H18zm0 15h28v7H18z" fill="#fff"/></svg>'
+FAVICON_ICO = base64.b64decode("AAABAAEAAQEAAAEAIABEAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAABAAAAAQgEAAAAtRwMAgAAAAtJREFUeNpj/P8fAALrAfWPWeEtAAAAAElFTkSuQmCC")
 
 def render_status(host):
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="/favicon.svg" type="image/svg+xml"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
@@ -702,7 +704,14 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
-        if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+        if path == "/favicon.ico":
+            self.reply(200, FAVICON_ICO, "image/x-icon")
+            try:
+                self.wfile.write(FAVICON_ICO)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
             self.no_content()
             return
 
@@ -723,7 +732,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/favicon.svg":
             self.reply(200, b"", "image/svg+xml")
             return
-        if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+        if path == "/favicon.ico":
+            self.reply(200, b"", "image/x-icon")
+            return
+        if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
             self.no_content()
             return
         self.reply(200, b"", "text/html; charset=utf-8")
