@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import base64
 import html
 import ipaddress
@@ -20,7 +21,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.9.9"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -165,12 +166,7 @@ def parse_yaml_scalar(value):
 
 
 def local_user_filter_rules():
-    """Read top-level user_rules directly from AdGuardHome.yaml.
-
-    Returns (rules, error).  rules is None when the config file isn't mounted or
-    readable; an empty list means the file was read successfully and contains no
-    custom rules.
-    """
+    """Read top-level user_rules directly from AdGuardHome.yaml."""
     try:
         with open(AGH_CONFIG_FILE, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -180,15 +176,28 @@ def local_user_filter_rules():
     rules = []
     in_rules = False
     base_indent = 0
+    found = False
     for line in lines:
         raw = line.rstrip("\n\r")
         stripped = raw.strip()
         if not in_rules:
-            m = re.match(r"^(\s*)user_rules\s*:\s*$", raw)
+            m = re.match(r"^(\s*)user_rules\s*:\s*(.*?)\s*$", raw)
             if not m:
                 continue
-            in_rules = True
+            found = True
             base_indent = len(m.group(1))
+            inline = m.group(2).strip()
+            if inline:
+                if inline == "[]":
+                    return [], ""
+                if inline.startswith("[") and inline.endswith("]"):
+                    try:
+                        value = ast.literal_eval(inline)
+                        if isinstance(value, (list, tuple)):
+                            return [str(x).strip() for x in value if str(x).strip()], ""
+                    except Exception:
+                        pass
+            in_rules = True
             continue
         if not stripped or stripped.startswith("#"):
             continue
@@ -203,8 +212,7 @@ def local_user_filter_rules():
             rule = parse_yaml_scalar(value)
             if rule and rule not in rules:
                 rules.append(rule)
-    return rules, ""
-
+    return rules if found else None, "" if found else "user_rules not found in local config"
 
 def refresh_filter_state(force=False):
     now = time.time()
@@ -568,67 +576,86 @@ def tail_json_lines(path, max_bytes):
     return data.splitlines()
 
 
+DNS_TYPE_NAMES = {
+    1: "A",
+    2: "NS",
+    5: "CNAME",
+    12: "PTR",
+    15: "MX",
+    16: "TXT",
+    28: "AAAA",
+    33: "SRV",
+    64: "SVCB",
+    65: "HTTPS",
+}
+
+
+def normalize_qtype(value):
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return DNS_TYPE_NAMES.get(value, str(value))
+    text = str(value).strip().upper()
+    if text.isdigit():
+        return DNS_TYPE_NAMES.get(int(text), text)
+    return text
+
+
 def local_log_entry(entry):
-    """Convert AdGuard's on-disk querylog JSON shape to the API-like shape."""
+    """Convert AdGuard's on-disk compact JSON record to an API-like record.
+
+    Disk records use QH/QT/IP and Result.{Rule,FilterID}; API records use
+    question/client/rules.  Support both so upgrades remain compatible.
+    """
     if not isinstance(entry, dict):
         return "", "", "", {}
 
-    host = str(entry.get("QH") or "").lower().rstrip(".")
-    qtype = str(entry.get("QT") or "").upper()
-    client = normalize_ip(str(entry.get("IP") or ""))
-    question = entry.get("question") or {}
-    if not host:
-        host = str(question.get("host") or question.get("name") or "").lower().rstrip(".")
-    if not qtype:
-        qtype = str(question.get("type") or "").upper()
-    if not client:
-        client = normalize_ip(str(entry.get("client") or ""))
+    question = entry.get("question") if isinstance(entry.get("question"), dict) else {}
+    host = str(entry.get("QH") or question.get("host") or question.get("name") or "").lower().rstrip(".")
+    qtype = normalize_qtype(entry.get("QT") if "QT" in entry else question.get("type"))
+    client = normalize_ip(str(entry.get("IP") or entry.get("client") or ""))
 
     result = entry.get("Result") if isinstance(entry.get("Result"), dict) else {}
-    reason = result.get("Reason", entry.get("reason", ""))
     service = str(result.get("ServiceName") or result.get("Service") or entry.get("service_name") or "").strip()
 
+    rules = []
     raw_rules = result.get("Rules") or result.get("rules") or entry.get("rules") or []
     if isinstance(raw_rules, dict):
         raw_rules = [raw_rules]
-    rules = []
     for rule in raw_rules:
         if isinstance(rule, str):
-            text, fid = rule, None
+            rule_text, fid = rule.strip(), None
         elif isinstance(rule, dict):
-            text = str(rule.get("Text") or rule.get("text") or rule.get("Rule") or rule.get("rule") or "").strip()
+            rule_text = str(rule.get("Text") or rule.get("text") or rule.get("Rule") or rule.get("rule") or "").strip()
             fid = rule.get("FilterListID", rule.get("FilterID", rule.get("filter_list_id", rule.get("filter_id"))))
         else:
             continue
-        if text:
-            rules.append({"text": text, "filter_list_id": fid})
+        if rule_text:
+            rules.append({"text": rule_text, "filter_list_id": fid})
 
+    # This is the documented on-disk compact form.
     if not rules:
-        text = str(result.get("Rule") or entry.get("rule") or "").strip()
+        rule_text = str(result.get("Rule") or entry.get("rule") or "").strip()
         fid = result.get("FilterID", result.get("FilterId", entry.get("filter_id", entry.get("filterId"))))
-        if text:
-            rules.append({"text": text, "filter_list_id": fid})
+        if rule_text:
+            rules.append({"text": rule_text, "filter_list_id": fid})
 
-    if isinstance(reason, str):
-        reason_name = reason.strip()
-    else:
-        reason_name = ""
+    raw_reason = result.get("Reason", entry.get("reason", ""))
+    reason_name = raw_reason.strip() if isinstance(raw_reason, str) else ""
     if not reason_name:
         if service:
             reason_name = "FilteredBlockedService"
         elif rules or result.get("IsFiltered"):
             reason_name = "FilteredBlackList"
 
-    converted = {
+    return host, qtype, client, {
         "reason": reason_name,
         "rules": rules,
         "service_name": service,
     }
-    return host, qtype, client, converted
 
 
 def local_querylog_matches(host, client_ip):
-    errors = []
     path = AGH_QUERYLOG_FILE
     if not path:
         return [], ["local query log path is empty"]
@@ -640,7 +667,6 @@ def local_querylog_matches(host, client_ip):
     target_host = str(host or "").lower().rstrip(".")
     target_client = normalize_ip(client_ip)
     exact = []
-    # Newest first.  A partially-written final line is harmless and skipped.
     for raw in reversed(lines):
         if not raw.strip():
             continue
@@ -651,13 +677,12 @@ def local_querylog_matches(host, client_ip):
         qhost, qtype, logged_client, converted = local_log_entry(entry)
         if qhost != target_host:
             continue
-        score = 1 if logged_client and logged_client == target_client else 0
+        score = 2 if logged_client and logged_client == target_client else 1
         exact.append((score, qtype, converted))
-        if len(exact) >= 12:
+        if len(exact) >= 16:
             break
     exact.sort(key=lambda x: x[0], reverse=True)
-    return exact[:8], errors
-
+    return exact[:12], []
 
 def check_host(host, client_ip, qtype):
     attempts = []
@@ -868,7 +893,7 @@ def block_details(host, client_ip):
         "stale": False,
         "detail_source": detail_source,
         "custom_rule_count": len(current_user_rules),
-        "custom_match": any(custom_rule_matches_host(x, host) for x in current_user_rules),
+        "custom_match": bool(custom_texts) or any(custom_rule_matches_host(x, host) for x in current_user_rules),
         "filter_state_bases": list(CACHE.get("filter_state_bases") or []),
         "filter_state_errors": list(CACHE.get("filter_state_errors") or []),
         "user_rules_source": CACHE.get("user_rules_source", ""),
@@ -929,7 +954,7 @@ FAVICON_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAA
 FAVICON_DATA_URI = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNiMzI2MWUiLz48cGF0aCBkPSJNMTggMjFoMjh2N0gxOHptMCAxNWgyOHY3SDE4eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=="
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=098"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=098"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=098"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=098"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=099"><link rel="shortcut icon" href="/favicon.ico?v=099"><meta name="theme-color" content="#b3261e"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
@@ -1009,7 +1034,7 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=098"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=098"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=098"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=098"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=099"><link rel="shortcut icon" href="/favicon.ico?v=099"><meta name="theme-color" content="#b3261e"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1033,6 +1058,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+    def asset_reply(self, body, content_type, head=False):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        if not head:
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
     def no_content(self):
         self.send_response(204)
         self.send_header("Cache-Control", "no-store, max-age=0")
@@ -1052,25 +1092,13 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
         if path == "/favicon.svg":
-            self.reply(200, FAVICON_SVG, "image/svg+xml")
-            try:
-                self.wfile.write(FAVICON_SVG)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_SVG, "image/svg+xml")
             return
         if path == "/favicon.ico":
-            self.reply(200, FAVICON_ICO, "image/x-icon")
-            try:
-                self.wfile.write(FAVICON_ICO)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_ICO, "image/x-icon")
             return
         if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.reply(200, FAVICON_PNG, "image/png")
-            try:
-                self.wfile.write(FAVICON_PNG)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_PNG, "image/png")
             return
 
         host = self.request_host()
@@ -1088,13 +1116,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/favicon.svg":
-            self.reply(200, b"", "image/svg+xml")
+            self.asset_reply(FAVICON_SVG, "image/svg+xml", head=True)
             return
         if path == "/favicon.ico":
-            self.reply(200, b"", "image/x-icon")
+            self.asset_reply(FAVICON_ICO, "image/x-icon", head=True)
             return
         if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.reply(200, b"", "image/png")
+            self.asset_reply(FAVICON_PNG, "image/png", head=True)
             return
         self.reply(200, b"", "text/html; charset=utf-8")
 
