@@ -17,7 +17,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
-APP_VERSION = "0.9.6"
+APP_VERSION = "0.9.7"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -665,17 +665,20 @@ def block_details(host, client_ip):
         ingest(data, "")
 
     # The DNS query necessarily happened before this HTTP block page loaded.
-    # If check_host was temporarily unavailable, recover the exact logged reason/rule.
-    if not rules or not api_ok:
-        logged, errors = querylog_matches(host, client_ip)
-        for error in errors:
-            entry = f"querylog: {error}"
-            if entry not in api_errors:
-                api_errors.append(entry)
-        if logged:
+    # Always inspect its exact Query Log records as well as check_host.  AdGuard may
+    # choose a subscribed-list rule in check_host even when the same rule also
+    # matched Custom filtering rules.  Query Log entries preserve filter_list_id=0
+    # for a custom-rule match, which is authoritative custom-rule evidence.
+    logged, errors = querylog_matches(host, client_ip)
+    for error in errors:
+        entry = f"querylog: {error}"
+        if entry not in api_errors:
+            api_errors.append(entry)
+    if logged:
+        if not api_ok or not rules:
             detail_source = "querylog"
-            for _, qtype, entry in logged:
-                ingest(entry, qtype if qtype in ("A", "AAAA") else "")
+        for _, qtype, entry in logged:
+            ingest(entry, qtype if qtype in ("A", "AAAA") else "")
 
     # AdGuard may report only one winning block-list rule even when the same host
     # also matches a user rule.  Explicitly surface matching user rules as Custom rule.
@@ -688,8 +691,14 @@ def block_details(host, client_ip):
         item = rules.setdefault(key, {"list": "Custom rule", "rule": text, "kind": rule_kind(text), "types": []})
         for qtype in custom_rule_types(text):
             merge_types(item["types"], qtype)
-    if custom_found:
-        custom_texts = {normalized_rule_text(item["rule"]) for item in rules.values() if item.get("list") == "Custom rule"}
+    # If either user_rules or Query Log produced a Custom rule for the same exact
+    # rule text, Custom rule wins and the duplicate subscribed-list card is hidden.
+    custom_texts = {
+        normalized_rule_text(item["rule"])
+        for item in rules.values()
+        if item.get("list") == "Custom rule"
+    }
+    if custom_texts:
         for key, item in list(rules.items()):
             if item.get("list") != "Custom rule" and normalized_rule_text(item.get("rule")) in custom_texts:
                 del rules[key]
@@ -762,11 +771,12 @@ def display_device_name(name):
 
 
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b3261e"/><path d="M18 21h28v7H18zm0 15h28v7H18z" fill="#fff"/></svg>'
-FAVICON_ICO = base64.b64decode("AAABAAEAICAAAAEAIACKAAAAFgAAAIlQTkcNChoKAAAADUlIRFIAAAAgAAAAIAgGAAAAc3p69AAAAFFJREFUeNpjYEADm9Xk/tMSM+ACtLYYr0PobTmGIwbUAQNlOdwRow4YdcCgdgC1wKgDhq4DRnPBqANGC6JRB4wWRKMOGBkOGO0ZDYrO6UB2zwEghr0ZTmJhtQAAAABJRU5ErkJggg==")
+FAVICON_ICO = base64.b64decode("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")
+FAVICON_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAA4UlEQVR4nO2ZwQ2DQAzAQtU56K8sw7btMjw7SftigYTKkWL/D3zWCURYXs/1G4O50QI0BqAFaAxAC9AYgBagMQAtQGMAWoDGALQAjQFoARoD0AI0BqAFaO7VC+zH5wqPEu/tkV5bOgEdNh9R80gH6LL5k6zP+GeAAWgBGgNkF1ZePf8g61M6AV0iVDwWf44OxwC0AI0BaAGa8QGcB1Ru3GHzEc4DIsJ5QBoD0AI0Bsgu7PIpfOI8IInzAFqAxgC0AI0BaAEaA9ACNAagBWgMQAvQGIAWoDEALUBjAFqAZnyAH3WsJGSOMuO1AAAAAElFTkSuQmCC")
 FAVICON_DATA_URI = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNiMzI2MWUiLz48cGF0aCBkPSJNMTggMjFoMjh2N0gxOHptMCAxNWgyOHY3SDE4eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=="
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=096"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=096"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=096"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=097"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=097"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=097"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=097"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
@@ -841,7 +851,7 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=096"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=096"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=096"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=097"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=097"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=097"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=097"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -897,8 +907,12 @@ class Handler(BaseHTTPRequestHandler):
             except (BrokenPipeError, ConnectionResetError):
                 pass
             return
-        if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content()
+        if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            self.reply(200, FAVICON_PNG, "image/png")
+            try:
+                self.wfile.write(FAVICON_PNG)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
             return
 
         host = self.request_host()
@@ -921,8 +935,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/favicon.ico":
             self.reply(200, b"", "image/x-icon")
             return
-        if path in ("/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content()
+        if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            self.reply(200, b"", "image/png")
             return
         self.reply(200, b"", "text/html; charset=utf-8")
 
