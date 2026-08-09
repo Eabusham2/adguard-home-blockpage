@@ -4,6 +4,10 @@ services:
     container_name: adguard-home-blockpage
     restart: unless-stopped
     network_mode: host
+    # Read AdGuard's existing work/config mounts directly, but never write to them.
+    # Set AGH_CONTAINER_NAME in Portainer if your AdGuard container is not named adguardhome.
+    volumes_from:
+      - "container:${AGH_CONTAINER_NAME:-adguardhome}:ro"
     command:
       - sh
       - -c
@@ -12,6 +16,8 @@ services:
       AGH_URL: "${AGH_URL}"
       AGH_USERNAME: "${AGH_USERNAME}"
       AGH_PASSWORD: "${AGH_PASSWORD}"
+      AGH_QUERYLOG_FILE: "/opt/adguardhome/work/data/querylog.json"
+      AGH_CONFIG_FILE: "/opt/adguardhome/conf/AdGuardHome.yaml"
       PORT: "80"
     read_only: true
     tmpfs:
