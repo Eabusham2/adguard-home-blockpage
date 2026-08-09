@@ -290,47 +290,32 @@ def device_info(client_ip):
         if value and value not in info["macs"]:
             info["macs"].append(value)
 
-    def absorb_client(client):
-        if not client:
-            return False
-        changed = False
-        name = str(client.get("name") or "").strip()
-        if name and not info["name"]:
-            info["name"] = name
-            changed = True
-        before_a, before_m = len(info["addresses"]), len(info["macs"])
+    add_address(client_ip)
+    client = find_client_by_ip(client_ip)
+    if client:
+        info["name"] = str(client.get("name") or "").strip()
         for address in address_set(client):
             add_address(address)
         for mac in mac_ids(client):
             add_mac(mac)
-        return changed or len(info["addresses"]) != before_a or len(info["macs"]) != before_m
 
-    def absorb_neighbors(neighbors):
-        changed = False
-        known_macs = set(info["macs"])
-        for addr, mac in neighbors:
-            if addr in info["addresses"] and mac not in known_macs:
-                add_mac(mac)
-                known_macs.add(mac)
-                changed = True
-        for addr, mac in neighbors:
-            if mac in known_macs and addr not in info["addresses"]:
-                add_address(addr)
-                changed = True
-        return changed
-
-    add_address(client_ip)
     neighbors = neighbor_entries()
+    current_macs = [mac for addr, mac in neighbors if addr == client_ip]
+    for mac in current_macs:
+        add_mac(mac)
+        for addr, neighbor_mac in neighbors:
+            if neighbor_mac == mac:
+                add_address(addr)
 
-    for _ in range(4):
-        changed = False
-        for address in list(info["addresses"]):
-            if absorb_client(find_client_by_ip(address)):
-                changed = True
-        if absorb_neighbors(neighbors):
-            changed = True
-        if not changed:
-            break
+    for address in list(info["addresses"]):
+        candidate = find_client_by_ip(address)
+        if candidate:
+            if not info["name"]:
+                info["name"] = str(candidate.get("name") or "").strip()
+            for extra in address_set(candidate):
+                add_address(extra)
+            for mac in mac_ids(candidate):
+                add_mac(mac)
 
     if not info["name"]:
         for address in list(info["addresses"]):
@@ -340,10 +325,12 @@ def device_info(client_ip):
                 break
 
     if info["name"]:
-        absorb_client(find_client_by_name(info["name"]))
-        absorb_neighbors(neighbors)
-        for address in list(info["addresses"]):
-            absorb_client(find_client_by_ip(address))
+        candidate = find_client_by_name(info["name"])
+        if candidate:
+            for address in address_set(candidate):
+                add_address(address)
+            for mac in mac_ids(candidate):
+                add_mac(mac)
 
     if not info["name"]:
         for address in list(info["addresses"]):
@@ -354,7 +341,6 @@ def device_info(client_ip):
                     break
             except Exception:
                 pass
-
     return info
 
 
@@ -475,89 +461,98 @@ def esc(value):
 
 
 CSS = r'''
-:root{color-scheme:light dark;--bg:#fff;--text:#181818;--muted:#6d6d6d;--line:#e2e2e2;--soft:#f6f6f6;--accent:#a12620;--chip:#eeeeec}
-@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#aaa;--line:#383838;--soft:#222;--accent:#ff9189;--chip:#2a2a29}}
+:root{color-scheme:light dark;--bg:#ffffff;--text:#191919;--muted:#6f6f6f;--line:#dedede;--soft:#f6f6f6;--code:#f3f3f3;--accent:#a5221c}
+@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#a8a8a8;--line:#383838;--soft:#202020;--code:#222222;--accent:#ff8c84}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(700px,100%);margin:0 auto;padding:max(38px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(44px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
-header{padding-bottom:24px}.eyebrow{margin:0 0 6px;color:var(--accent);font-size:13px;font-weight:650}.title{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 0;color:var(--muted);max-width:56ch}.domain{margin-top:20px;padding:12px 14px;background:var(--soft);border-radius:7px;font:600 17px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-section{margin-top:26px}.section-title{margin:0 0 9px;font-size:15px;font-weight:650}.panel{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:112px minmax(0,1fr);gap:18px;padding:10px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:620}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.rule{padding:14px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.filter{font-weight:620}.chip{display:inline-block;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--muted);font-size:11px;line-height:1.5}.ruletext{margin-top:7px;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere;color:var(--muted)}
-.dns-grid{border-top:1px solid var(--line)}details{margin-top:27px;border-top:1px solid var(--line);padding-top:12px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:9px;color:var(--muted);font-size:13px}.technical div{margin:4px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:70dvh;display:grid;align-content:center}
-@media(max-width:520px){main{padding-left:15px;padding-right:15px}.title{font-size:27px}.row{grid-template-columns:1fr;gap:2px;padding:9px 0}.domain{font-size:15px}.rulehead{align-items:flex-start}.chip{margin-top:1px}}
+main{width:min(700px,100%);margin:0 auto;padding:max(42px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(46px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+header{padding-bottom:27px;border-bottom:1px solid var(--line)}.title{margin:0;font-size:34px;line-height:1.1;letter-spacing:-.025em;font-weight:680}.lead{margin:9px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:20px;padding:11px 13px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font:600 17px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:29px}.section-title{margin:0 0 10px;font-size:16px;font-weight:650}.panel{border:1px solid var(--line);border-radius:10px;overflow:hidden}.row{display:grid;grid-template-columns:116px minmax(0,1fr);gap:18px;padding:11px 13px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:14px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:10px 16px;align-items:flex-start}.filter{font-weight:650}.meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.7;white-space:nowrap}.ruletext{margin-top:8px;padding:9px 11px;background:var(--code);border-radius:6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.fallback{padding:13px;border:1px solid var(--line);border-radius:10px}.dns{border-top:1px solid var(--line)}details{margin-top:30px;border-top:1px solid var(--line);padding-top:13px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:10px;color:var(--muted);font-size:13px}.technical div{margin:5px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:75vh;display:grid;align-content:center}.status header{border-bottom:0}
+@media(max-width:520px){main{padding-left:15px;padding-right:15px}.title{font-size:30px}.row{grid-template-columns:1fr;gap:2px}.rulehead{display:block}.meta{justify-content:flex-start;margin-top:5px}.domain{font-size:15px}.panel{border-radius:8px}}
 '''
+
 
 def types_text(types):
     return " + ".join(types)
 
 
+def display_device_name(name):
+    name = str(name or "").strip().rstrip(".")
+    lower = name.casefold()
+    for suffix in (".home.arpa", ".local"):
+        if lower.endswith(suffix):
+            short = name[:-len(suffix)].rstrip(".")
+            if short:
+                return short
+    return name
+
+
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><p class="eyebrow">Block page</p><h1 class="title">Service is running</h1><p class="lead">AdGuard Home can redirect blocked HTTP destinations to this address.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
+    full_name = str(device.get("name") or "").strip().rstrip(".")
+    short_name = display_device_name(full_name)
     ipv4 = [a for a in device.get("addresses", []) if ":" not in a]
     ipv6 = [a for a in device.get("addresses", []) if ":" in a]
 
     device_rows = []
-    if device.get("name"):
-        device_rows.append(f'<div class="row"><div class="label">Name</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>')
+    if short_name:
+        device_rows.append(f'<div class="row"><div class="label">Name</div><div class="value name">{esc(short_name)}</div></div>')
     if ipv4:
         device_rows.append(f'<div class="row"><div class="label">IPv4</div><div class="value mono">{esc(", ".join(ipv4))}</div></div>')
     if ipv6:
         device_rows.append(f'<div class="row"><div class="label">IPv6</div><div class="value mono">{esc(", ".join(ipv6))}</div></div>')
     if device.get("macs"):
         device_rows.append(f'<div class="row"><div class="label">MAC</div><div class="value mono">{esc(", ".join(device["macs"]))}</div></div>')
-    device_html = f'<section><h2 class="section-title">Device details</h2><div class="panel">{"".join(device_rows)}</div></section>' if device_rows else ""
+    device_html = f'<section><h2 class="section-title">Device</h2><div class="panel">{"".join(device_rows)}</div></section>' if device_rows else ""
 
-    why_items = []
     if details["rules"]:
+        items = []
         for item in details["rules"]:
             source = esc(item["list"] or "Filtering rule")
-            chips = [item.get("kind", "Rule")]
-            qtypes = types_text(item["types"])
-            if qtypes:
-                chips.append(qtypes)
-            chip_html = "".join(f'<span class="chip">{esc(x)}</span>' for x in chips if x)
+            kind = esc(item.get("kind", "Rule"))
+            qtypes = esc(types_text(item["types"]))
+            badges = f'<span class="pill">{kind}</span>' + (f'<span class="pill">{qtypes}</span>' if qtypes else "")
             text = esc(item["rule"] or "Rule text unavailable")
-            why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{source}</span>{chip_html}</div><div class="ruletext">{text}</div></div>')
-    elif details["services"]:
-        for item in details["services"]:
-            qtypes = types_text(item["types"])
-            chip = f'<span class="chip">{esc(qtypes)}</span>' if qtypes else ""
-            why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">Blocked service: {esc(item["value"])}</span>{chip}</div></div>')
+            items.append(f'<div class="rule"><div class="rulehead"><div class="filter">{source}</div><div class="meta">{badges}</div></div><div class="ruletext">{text}</div></div>')
+        blocked_html = f'<section><h2 class="section-title">Blocked by</h2>{"".join(items)}</section>'
     else:
-        reason = details["reasons"][0]
-        qtypes = types_text(reason["types"])
-        chip = f'<span class="chip">{esc(qtypes)}</span>' if qtypes else ""
-        why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{esc(reason["friendly"])}</span>{chip}</div></div>')
-
-    why_heading = "Why it was blocked" if len(why_items) == 1 else f'Why it was blocked ({len(why_items)} matches)'
-    why_html = f'<section><h2 class="section-title">{esc(why_heading)}</h2><div>{"".join(why_items)}</div></section>'
+        reason = details["reasons"][0]["friendly"] if details["reasons"] else "Network filtering"
+        blocked_html = f'<section><h2 class="section-title">Blocked by</h2><div class="fallback">{esc(reason)}</div></section>'
 
     dns_rows = []
-    if details["rules"]:
-        for item in details["services"]:
-            dns_rows.append(f'<div class="row"><div class="label">Service</div><div class="value">{esc(item["value"])}</div></div>')
+    for item in details["services"]:
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        dns_rows.append(f'<div class="row"><div class="label">Service</div><div class="value">{esc(text)}</div></div>')
     for item in details["cnames"]:
-        dns_rows.append(f'<div class="row"><div class="label">CNAME</div><div class="value mono">{esc(item["value"])}</div></div>')
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        dns_rows.append(f'<div class="row"><div class="label">CNAME</div><div class="value mono">{esc(text)}</div></div>')
     for item in details["rewrites"]:
-        label = "IPv6 rewrite" if ":" in item["value"] else "IPv4 rewrite"
-        dns_rows.append(f'<div class="row"><div class="label">{label}</div><div class="value mono">{esc(item["value"])}</div></div>')
-    dns_html = f'<section><h2 class="section-title">DNS details</h2><div class="dns-grid">{"".join(dns_rows)}</div></section>' if dns_rows else ""
+        suffix = types_text(item["types"])
+        text = item["value"] + (f" · {suffix}" if suffix else "")
+        dns_rows.append(f'<div class="row"><div class="label">Rewrite</div><div class="value mono">{esc(text)}</div></div>')
+    dns_html = f'<section><h2 class="section-title">DNS details</h2><div class="panel dns">{"".join(dns_rows)}</div></section>' if dns_rows else ""
 
     technical = []
     current = device.get("current") or ""
+    if full_name and short_name != full_name:
+        technical.append(f'<div>Hostname: <span class="mono">{esc(full_name)}</span></div>')
     if current:
         technical.append(f'<div>Connection source: <span class="mono">{esc(current)}</span></div>')
     for reason in details["reasons"]:
         if reason["raw"]:
             qtypes = types_text(reason["types"])
             suffix = f" · {qtypes}" if qtypes else ""
-            technical.append(f'<div>AdGuard result: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
+            technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>' if technical else ""
     note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#171717"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{why_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><h1 class="title">Blocked</h1><p class="lead">This address was stopped by your network's DNS filtering.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -567,37 +562,99 @@ class Handler(BaseHTTPRequestHandler):
             return value[1:value.index("]")].lower().rstrip(".")
         return value.split(":", 1)[0].lower().rstrip(".")
 
+    def local_origin(self):
+        try:
+            address = normalize_ip(str(self.connection.getsockname()[0]))
+        except Exception:
+            return ""
+        if not address or address in ("0.0.0.0", "::"):
+            return ""
+        return f"http://[{address}]" if ":" in address else f"http://{address}"
+
     def reply(self, code, body, content_type):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'none'; connect-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.send_header("Connection", "close")
         self.end_headers()
+        self.close_connection = True
+
+    def redirect_to_local(self, blocked_host):
+        origin = self.local_origin()
+        if not origin:
+            return False
+        location = origin + "/?blocked=" + urllib.parse.quote(blocked_host, safe="")
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store, max-age=0")
+        self.send_header("Content-Length", "0")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        return True
+
+    def no_content(self):
+        self.send_response(204)
+        self.send_header("Cache-Control", "public, max-age=86400")
+        self.send_header("Content-Length", "0")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+
+    def parse_request_target(self):
+        parsed = urllib.parse.urlsplit(self.path)
+        query = urllib.parse.parse_qs(parsed.query, keep_blank_values=False)
+        blocked = str((query.get("blocked") or [""])[0]).strip().lower().rstrip(".")
+        if len(blocked) > 253 or "/" in blocked or "\\" in blocked or is_ip(blocked):
+            blocked = ""
+        return parsed.path, blocked
 
     def do_GET(self):
-        if self.path == "/healthz":
+        path, blocked = self.parse_request_target()
+        if path == "/healthz":
             body = b'{"ok":true}'
             self.reply(200, body, "application/json")
-            self.wfile.write(body)
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
+        if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            self.no_content()
             return
 
         host = self.request_host()
-        if not host or is_ip(host):
-            body = render_status(host or "block page")
-            self.reply(200, body, "text/html; charset=utf-8")
-            self.wfile.write(body)
-            return
-
         client_ip = normalize_ip(self.client_address[0])
-        body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
+        if host and not is_ip(host):
+            if self.redirect_to_local(host):
+                return
+            blocked = host
+
+        if blocked:
+            body = render_blocked(blocked, device_info(client_ip), block_details(blocked, client_ip))
+        else:
+            body = render_status(host or "block page")
         self.reply(200, body, "text/html; charset=utf-8")
-        self.wfile.write(body)
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
 
     def do_HEAD(self):
+        path, blocked = self.parse_request_target()
+        host = self.request_host()
+        if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
+            self.no_content()
+            return
+        if host and not is_ip(host) and self.redirect_to_local(host):
+            return
         self.reply(200, b"", "text/html; charset=utf-8")
 
     def log_message(self, fmt, *args):

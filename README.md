@@ -16,6 +16,8 @@ A small HTTP block page for AdGuard Home, designed for Docker/Portainer and dual
 - Plain responsive system-style UI with no JavaScript, gradients, or decorative branding
 - Direct IP visits show a service-status page
 
+
+- Redirects blocked HTTP requests to the block-page server's own LAN IP before rendering, keeping the replacement page out of the blocked site's origin
 ## Important limitation about multiple blocklists
 
 AdGuard Home's `filtering/check_host` API reports the rules it actually applies. A hostname can exist in several subscribed lists while AdGuard returns only the applied rule(s). This project displays every rule/list AdGuard reports for both A and AAAA; it does not independently download and scan every blocklist.
