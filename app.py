@@ -17,7 +17,7 @@ AGH_URL = os.getenv("AGH_URL", "").rstrip("/")
 AGH_USERNAME = os.getenv("AGH_USERNAME", "")
 AGH_PASSWORD = os.getenv("AGH_PASSWORD", "")
 PORT = int(os.getenv("PORT", "80"))
-APP_VERSION = "0.9.4"
+APP_VERSION = "0.9.5"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -136,33 +136,43 @@ def is_ip(value):
         return False
 
 
-def filter_names():
+def refresh_filter_state(force=False):
     now = time.time()
-    if CACHE["filters_until"] > now:
+    if not force and CACHE["filters_until"] > now:
         return CACHE["filters"]
 
-    names = dict(SPECIAL_LISTS)
     try:
         status = api_get("/control/filtering/status", timeout=2.0)
-        for section in ("filters", "whitelist_filters"):
-            for item in status.get(section, []) or []:
-                filter_id = item.get("id")
-                name = item.get("name")
-                if filter_id is not None and name and str(filter_id) != "0":
-                    names[str(filter_id)] = str(name)
-        rules = status.get("user_rules", []) or []
-        CACHE["user_rules"] = [str(x).strip() for x in rules if str(x).strip()]
     except Exception:
-        pass
+        # Never turn a transient API failure into a five-minute empty cache.
+        return CACHE["filters"] or dict(SPECIAL_LISTS)
 
+    names = dict(SPECIAL_LISTS)
+    for section in ("filters", "whitelist_filters"):
+        for item in status.get(section, []) or []:
+            filter_id = item.get("id")
+            name = item.get("name")
+            if filter_id is not None and name and str(filter_id) != "0":
+                names[str(filter_id)] = str(name)
+
+    rules = status.get("user_rules", []) or []
     CACHE["filters"] = names
-    CACHE["filters_until"] = now + 300
+    CACHE["user_rules"] = [str(x).strip() for x in rules if str(x).strip()]
+    CACHE["filters_until"] = now + 60
     return names
 
 
-def user_filter_rules():
-    filter_names()
+def filter_names():
+    return refresh_filter_state(False)
+
+
+def user_filter_rules(force=False):
+    refresh_filter_state(force)
     return list(CACHE.get("user_rules") or [])
+
+
+def normalized_rule_text(value):
+    return str(value or "").strip().replace("\r\n", "\n").replace("\r", "\n")
 
 def client_catalog():
     now = time.time()
@@ -540,6 +550,8 @@ def display_filter_name(filter_id, list_name, rule_text):
 
 def block_details(host, client_ip):
     names = filter_names()
+    current_user_rules = user_filter_rules(force=True)
+    user_rule_by_text = {normalized_rule_text(x): x for x in current_user_rules}
     reasons = {}
     rules = {}
     services = {}
@@ -588,8 +600,16 @@ def block_details(host, client_ip):
                 filter_id = rule.get("filter_list_id", rule.get("filter_id"))
             else:
                 continue
-            list_name = names.get(str(filter_id), f"Filter #{filter_id}") if filter_id is not None else ""
-            list_name = display_filter_name(filter_id, list_name, text)
+            # AdGuard may report a subscribed-list ID even when the exact same rule
+            # also exists in Custom filtering rules.  The user-rules collection is
+            # authoritative for the label in that case.
+            exact_user_rule = user_rule_by_text.get(normalized_rule_text(text))
+            if exact_user_rule is not None:
+                text = exact_user_rule
+                list_name = "Custom rule"
+            else:
+                list_name = names.get(str(filter_id), f"Filter #{filter_id}") if filter_id is not None else ""
+                list_name = display_filter_name(filter_id, list_name, text)
             key = (list_name, text)
             item = rules.setdefault(key, {"list": list_name, "rule": text, "kind": rule_kind(text), "types": []})
             if qtype:
@@ -627,7 +647,7 @@ def block_details(host, client_ip):
     # AdGuard may report only one winning block-list rule even when the same host
     # also matches a user rule.  Explicitly surface matching user rules as Custom rule.
     custom_found = False
-    for text in user_filter_rules():
+    for text in current_user_rules:
         if not custom_rule_matches_host(text, host):
             continue
         custom_found = True
@@ -635,6 +655,11 @@ def block_details(host, client_ip):
         item = rules.setdefault(key, {"list": "Custom rule", "rule": text, "kind": rule_kind(text), "types": []})
         for qtype in custom_rule_types(text):
             merge_types(item["types"], qtype)
+    if custom_found:
+        custom_texts = {normalized_rule_text(item["rule"]) for item in rules.values() if item.get("list") == "Custom rule"}
+        for key, item in list(rules.items()):
+            if item.get("list") != "Custom rule" and normalized_rule_text(item.get("rule")) in custom_texts:
+                del rules[key]
     if custom_found and not any(r.get("raw") for r in reasons.values()):
         reasons["FilteredBlackList"] = {"raw": "FilteredBlackList", "friendly": "DNS blocklist", "types": ["A", "AAAA"]}
 
@@ -704,7 +729,7 @@ FAVICON_ICO = base64.b64decode("AAABAAEAICAAAAEAIACKAAAAFgAAAIlQTkcNChoKAAAADUlI
 FAVICON_DATA_URI = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNiMzI2MWUiLz48cGF0aCBkPSJNMTggMjFoMjh2N0gxOHptMCAxNWgyOHY3SDE4eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=="
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><link rel="shortcut icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=095"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=095"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=095"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
@@ -773,7 +798,7 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><link rel="shortcut icon" href="{FAVICON_DATA_URI}" type="image/svg+xml"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=095"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=095"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=095"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
