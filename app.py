@@ -290,32 +290,47 @@ def device_info(client_ip):
         if value and value not in info["macs"]:
             info["macs"].append(value)
 
-    add_address(client_ip)
-    client = find_client_by_ip(client_ip)
-    if client:
-        info["name"] = str(client.get("name") or "").strip()
+    def absorb_client(client):
+        if not client:
+            return False
+        changed = False
+        name = str(client.get("name") or "").strip()
+        if name and not info["name"]:
+            info["name"] = name
+            changed = True
+        before_a, before_m = len(info["addresses"]), len(info["macs"])
         for address in address_set(client):
             add_address(address)
         for mac in mac_ids(client):
             add_mac(mac)
+        return changed or len(info["addresses"]) != before_a or len(info["macs"]) != before_m
 
-    neighbors = neighbor_entries()
-    current_macs = [mac for addr, mac in neighbors if addr == client_ip]
-    for mac in current_macs:
-        add_mac(mac)
-        for addr, neighbor_mac in neighbors:
-            if neighbor_mac == mac:
-                add_address(addr)
-
-    for address in list(info["addresses"]):
-        candidate = find_client_by_ip(address)
-        if candidate:
-            if not info["name"]:
-                info["name"] = str(candidate.get("name") or "").strip()
-            for extra in address_set(candidate):
-                add_address(extra)
-            for mac in mac_ids(candidate):
+    def absorb_neighbors(neighbors):
+        changed = False
+        known_macs = set(info["macs"])
+        for addr, mac in neighbors:
+            if addr in info["addresses"] and mac not in known_macs:
                 add_mac(mac)
+                known_macs.add(mac)
+                changed = True
+        for addr, mac in neighbors:
+            if mac in known_macs and addr not in info["addresses"]:
+                add_address(addr)
+                changed = True
+        return changed
+
+    add_address(client_ip)
+    neighbors = neighbor_entries()
+
+    for _ in range(4):
+        changed = False
+        for address in list(info["addresses"]):
+            if absorb_client(find_client_by_ip(address)):
+                changed = True
+        if absorb_neighbors(neighbors):
+            changed = True
+        if not changed:
+            break
 
     if not info["name"]:
         for address in list(info["addresses"]):
@@ -325,12 +340,10 @@ def device_info(client_ip):
                 break
 
     if info["name"]:
-        candidate = find_client_by_name(info["name"])
-        if candidate:
-            for address in address_set(candidate):
-                add_address(address)
-            for mac in mac_ids(candidate):
-                add_mac(mac)
+        absorb_client(find_client_by_name(info["name"]))
+        absorb_neighbors(neighbors)
+        for address in list(info["addresses"]):
+            absorb_client(find_client_by_ip(address))
 
     if not info["name"]:
         for address in list(info["addresses"]):
@@ -341,6 +354,7 @@ def device_info(client_ip):
                     break
             except Exception:
                 pass
+
     return info
 
 
@@ -461,17 +475,16 @@ def esc(value):
 
 
 CSS = r'''
-:root{color-scheme:light dark;--bg:#fff;--text:#181818;--muted:#707070;--line:#dedede;--code:#f4f4f4;--danger:#9d1b16}
-@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f0f0f0;--muted:#a7a7a7;--line:#3b3b3b;--code:#222;--danger:#ff8a82}}
+:root{color-scheme:light dark;--bg:#fff;--text:#181818;--muted:#6d6d6d;--line:#e2e2e2;--soft:#f6f6f6;--accent:#a12620;--chip:#eeeeec}
+@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#aaa;--line:#383838;--soft:#222;--accent:#ff9189;--chip:#2a2a29}}
 *{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(720px,100%);margin:0 auto;padding:max(40px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(44px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
-header{padding-bottom:24px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 7px;color:var(--danger);font-size:13px;font-weight:650}.title{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:22px;font:600 18px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-section{margin-top:28px}h2{margin:0 0 8px;font-size:15px;font-weight:650}.info{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:130px minmax(0,1fr);gap:18px;padding:11px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:600}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.rule{padding:13px 0;border-top:1px solid var(--line)}.rule:first-of-type{border-top:0}.rulehead{display:flex;gap:8px 12px;align-items:baseline;flex-wrap:wrap}.filter{font-weight:600}.meta{color:var(--muted);font-size:12px}.ruletext{margin-top:5px;padding:9px 10px;background:var(--code);border-radius:4px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-details{margin-top:28px;border-top:1px solid var(--line);padding-top:13px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:9px;color:var(--muted);font-size:13px}.technical div{margin:4px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:70dvh;display:grid;align-content:center}.status header{border-bottom:0}
-@media(max-width:520px){main{padding-left:16px;padding-right:16px}.title{font-size:27px}.row{grid-template-columns:1fr;gap:2px}.domain{font-size:16px}.ruletext{margin-left:-2px;margin-right:-2px}}
+main{width:min(700px,100%);margin:0 auto;padding:max(38px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(44px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
+header{padding-bottom:24px}.eyebrow{margin:0 0 6px;color:var(--accent);font-size:13px;font-weight:650}.title{margin:0;font-size:30px;line-height:1.15;letter-spacing:-.02em}.lead{margin:8px 0 0;color:var(--muted);max-width:56ch}.domain{margin-top:20px;padding:12px 14px;background:var(--soft);border-radius:7px;font:600 17px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:26px}.section-title{margin:0 0 9px;font-size:15px;font-weight:650}.panel{border-top:1px solid var(--line)}.row{display:grid;grid-template-columns:112px minmax(0,1fr);gap:18px;padding:10px 0;border-bottom:1px solid var(--line)}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.value strong{font-weight:620}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:14px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.filter{font-weight:620}.chip{display:inline-block;padding:2px 7px;border-radius:999px;background:var(--chip);color:var(--muted);font-size:11px;line-height:1.5}.ruletext{margin-top:7px;font:12.5px/1.55 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere;color:var(--muted)}
+.dns-grid{border-top:1px solid var(--line)}details{margin-top:27px;border-top:1px solid var(--line);padding-top:12px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:9px;color:var(--muted);font-size:13px}.technical div{margin:4px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:70dvh;display:grid;align-content:center}
+@media(max-width:520px){main{padding-left:15px;padding-right:15px}.title{font-size:27px}.row{grid-template-columns:1fr;gap:2px;padding:9px 0}.domain{font-size:15px}.rulehead{align-items:flex-start}.chip{margin-top:1px}}
 '''
-
 
 def types_text(types):
     return " + ".join(types)
@@ -482,44 +495,55 @@ def render_status(host):
 
 
 def render_blocked(host, device, details):
-    primary_reason = details["reasons"][0]["friendly"]
-    rows = [f'<div class="row"><div class="label">Reason</div><div class="value"><strong>{esc(primary_reason)}</strong></div></div>']
-
-    if device.get("name"):
-        rows.append(f'<div class="row"><div class="label">Device</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>')
-
     ipv4 = [a for a in device.get("addresses", []) if ":" not in a]
     ipv6 = [a for a in device.get("addresses", []) if ":" in a]
+
+    device_rows = []
+    if device.get("name"):
+        device_rows.append(f'<div class="row"><div class="label">Name</div><div class="value"><strong>{esc(device["name"])}</strong></div></div>')
     if ipv4:
-        rows.append(f'<div class="row"><div class="label">IPv4</div><div class="value mono">{esc(", ".join(ipv4))}</div></div>')
+        device_rows.append(f'<div class="row"><div class="label">IPv4</div><div class="value mono">{esc(", ".join(ipv4))}</div></div>')
     if ipv6:
-        rows.append(f'<div class="row"><div class="label">IPv6</div><div class="value mono">{esc(", ".join(ipv6))}</div></div>')
+        device_rows.append(f'<div class="row"><div class="label">IPv6</div><div class="value mono">{esc(", ".join(ipv6))}</div></div>')
     if device.get("macs"):
-        rows.append(f'<div class="row"><div class="label">MAC</div><div class="value mono">{esc(", ".join(device["macs"]))}</div></div>')
+        device_rows.append(f'<div class="row"><div class="label">MAC</div><div class="value mono">{esc(", ".join(device["macs"]))}</div></div>')
+    device_html = f'<section><h2 class="section-title">Device details</h2><div class="panel">{"".join(device_rows)}</div></section>' if device_rows else ""
 
-    for item in details["services"]:
-        suffix = types_text(item["types"])
-        text = item["value"] + (f" · {suffix}" if suffix else "")
-        rows.append(f'<div class="row"><div class="label">Service</div><div class="value">{esc(text)}</div></div>')
-    for item in details["cnames"]:
-        suffix = types_text(item["types"])
-        text = item["value"] + (f" · {suffix}" if suffix else "")
-        rows.append(f'<div class="row"><div class="label">CNAME</div><div class="value mono">{esc(text)}</div></div>')
-    for item in details["rewrites"]:
-        suffix = types_text(item["types"])
-        text = item["value"] + (f" · {suffix}" if suffix else "")
-        rows.append(f'<div class="row"><div class="label">Rewrite</div><div class="value mono">{esc(text)}</div></div>')
-
-    rules_html = ""
+    why_items = []
     if details["rules"]:
-        heading = "Matched rule" if len(details["rules"]) == 1 else f'Matched rules ({len(details["rules"])})'
-        items = []
         for item in details["rules"]:
             source = esc(item["list"] or "Filtering rule")
-            meta = " · ".join(x for x in (item.get("kind", "Rule"), types_text(item["types"])) if x)
+            chips = [item.get("kind", "Rule")]
+            qtypes = types_text(item["types"])
+            if qtypes:
+                chips.append(qtypes)
+            chip_html = "".join(f'<span class="chip">{esc(x)}</span>' for x in chips if x)
             text = esc(item["rule"] or "Rule text unavailable")
-            items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{source}</span><span class="meta">{esc(meta)}</span></div><div class="ruletext">{text}</div></div>')
-        rules_html = f'<section><h2>{esc(heading)}</h2>{"".join(items)}</section>'
+            why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{source}</span>{chip_html}</div><div class="ruletext">{text}</div></div>')
+    elif details["services"]:
+        for item in details["services"]:
+            qtypes = types_text(item["types"])
+            chip = f'<span class="chip">{esc(qtypes)}</span>' if qtypes else ""
+            why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">Blocked service: {esc(item["value"])}</span>{chip}</div></div>')
+    else:
+        reason = details["reasons"][0]
+        qtypes = types_text(reason["types"])
+        chip = f'<span class="chip">{esc(qtypes)}</span>' if qtypes else ""
+        why_items.append(f'<div class="rule"><div class="rulehead"><span class="filter">{esc(reason["friendly"])}</span>{chip}</div></div>')
+
+    why_heading = "Why it was blocked" if len(why_items) == 1 else f'Why it was blocked ({len(why_items)} matches)'
+    why_html = f'<section><h2 class="section-title">{esc(why_heading)}</h2><div>{"".join(why_items)}</div></section>'
+
+    dns_rows = []
+    if details["rules"]:
+        for item in details["services"]:
+            dns_rows.append(f'<div class="row"><div class="label">Service</div><div class="value">{esc(item["value"])}</div></div>')
+    for item in details["cnames"]:
+        dns_rows.append(f'<div class="row"><div class="label">CNAME</div><div class="value mono">{esc(item["value"])}</div></div>')
+    for item in details["rewrites"]:
+        label = "IPv6 rewrite" if ":" in item["value"] else "IPv4 rewrite"
+        dns_rows.append(f'<div class="row"><div class="label">{label}</div><div class="value mono">{esc(item["value"])}</div></div>')
+    dns_html = f'<section><h2 class="section-title">DNS details</h2><div class="dns-grid">{"".join(dns_rows)}</div></section>' if dns_rows else ""
 
     technical = []
     current = device.get("current") or ""
@@ -529,11 +553,11 @@ def render_blocked(host, device, details):
         if reason["raw"]:
             qtypes = types_text(reason["types"])
             suffix = f" · {qtypes}" if qtypes else ""
-            technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
+            technical.append(f'<div>AdGuard result: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>' if technical else ""
     note = "" if details["api_ok"] else '<p class="note">Detailed AdGuard information is temporarily unavailable.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#171717"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">Blocked by DNS filtering</p><h1 class="title">This address is blocked</h1><p class="lead">Your network stopped this destination before a connection was made.</p><div class="domain">{esc(host)}</div></header><section><h2>Details</h2><div class="info">{"".join(rows)}</div></section>{rules_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><meta name="theme-color" media="(prefers-color-scheme:light)" content="#ffffff"><meta name="theme-color" media="(prefers-color-scheme:dark)" content="#171717"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{why_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
