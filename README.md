@@ -15,6 +15,8 @@ A small HTTP block page for AdGuard Home, designed for Docker/Portainer and dual
 - Automatic light/dark mode
 - Plain responsive system-style UI with no JavaScript, gradients, or decorative branding
 - Direct IP visits show a service-status page
+- Blocked pages render in-place so the browser keeps the original blocked-domain URL
+- AdGuard custom filtering rules are labeled **Custom DNS filter**
 
 
 - Redirects blocked HTTP requests to the block-page server's own LAN IP before rendering, keeping the replacement page out of the blocked site's origin

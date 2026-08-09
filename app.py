@@ -30,7 +30,7 @@ FRIENDLY_REASONS = {
     "NotFilteredWhiteList": "Allowlist exception",
 }
 SPECIAL_LISTS = {
-    "0": "Custom filtering rules",
+    "0": "Custom DNS filter",
     "-1": "System hosts file",
     "-2": "Blocked services",
     "-3": "Parental controls",
@@ -106,7 +106,7 @@ def filter_names():
             for item in status.get(section, []) or []:
                 filter_id = item.get("id")
                 name = item.get("name")
-                if filter_id is not None and name:
+                if filter_id is not None and name and str(filter_id) != "0":
                     names[str(filter_id)] = str(name)
     except Exception:
         pass
@@ -461,15 +461,16 @@ def esc(value):
 
 
 CSS = r'''
-:root{color-scheme:light dark;--bg:#ffffff;--text:#191919;--muted:#6f6f6f;--line:#dedede;--soft:#f6f6f6;--code:#f3f3f3;--accent:#a5221c}
-@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#a8a8a8;--line:#383838;--soft:#202020;--code:#222222;--accent:#ff8c84}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(700px,100%);margin:0 auto;padding:max(42px,env(safe-area-inset-top)) max(20px,env(safe-area-inset-right)) max(46px,env(safe-area-inset-bottom)) max(20px,env(safe-area-inset-left))}
-header{padding-bottom:27px;border-bottom:1px solid var(--line)}.title{margin:0;font-size:34px;line-height:1.1;letter-spacing:-.025em;font-weight:680}.lead{margin:9px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:20px;padding:11px 13px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font:600 17px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-section{margin-top:29px}.section-title{margin:0 0 10px;font-size:16px;font-weight:650}.panel{border:1px solid var(--line);border-radius:10px;overflow:hidden}.row{display:grid;grid-template-columns:116px minmax(0,1fr);gap:18px;padding:11px 13px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.rule{padding:14px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:10px 16px;align-items:flex-start}.filter{font-weight:650}.meta{display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:1px 7px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.7;white-space:nowrap}.ruletext{margin-top:8px;padding:9px 11px;background:var(--code);border-radius:6px;font:12.5px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.fallback{padding:13px;border:1px solid var(--line);border-radius:10px}.dns{border-top:1px solid var(--line)}details{margin-top:30px;border-top:1px solid var(--line);padding-top:13px}summary{color:var(--muted);cursor:pointer;user-select:none}.technical{margin-top:10px;color:var(--muted);font-size:13px}.technical div{margin:5px 0}.note{margin-top:22px;color:var(--muted);font-size:13px}.status{min-height:75vh;display:grid;align-content:center}.status header{border-bottom:0}
-@media(max-width:520px){main{padding-left:15px;padding-right:15px}.title{font-size:30px}.row{grid-template-columns:1fr;gap:2px}.rulehead{display:block}.meta{justify-content:flex-start;margin-top:5px}.domain{font-size:15px}.panel{border-radius:8px}}
+:root{color-scheme:light dark;--bg:#fff;--text:#1b1b1b;--muted:#737373;--line:#e1e1e1;--soft:#f7f7f7;--code:#f4f4f4;--accent:#a5231d}
+@media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f0f0f0;--muted:#a6a6a6;--line:#363636;--soft:#1e1e1e;--code:#212121;--accent:#ff8d85}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:13.5px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{width:min(640px,100%);margin:0 auto;padding:max(26px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(28px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+header{padding-bottom:17px;border-bottom:1px solid var(--line)}.title{margin:0;font-size:27px;line-height:1.08;letter-spacing:-.02em;font-weight:680}.lead{margin:6px 0 0;color:var(--muted);max-width:58ch}.domain{margin-top:13px;padding:8px 10px;background:var(--soft);border:1px solid var(--line);border-radius:7px;font:600 14.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:18px}.section-title{margin:0 0 6px;font-size:13px;font-weight:680}.panel{border:1px solid var(--line);border-radius:8px;overflow:hidden}.row{display:grid;grid-template-columns:92px minmax(0,1fr);gap:12px;padding:7px 10px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:11.5px/1.42 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:9px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:7px 10px;align-items:center}.filter{font-weight:650}.meta{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:0 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10px;line-height:1.65;white-space:nowrap}.ruletext{margin-top:5px;padding:6px 8px;background:var(--code);border-radius:5px;font:11.5px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.fallback{padding:9px 10px;border:1px solid var(--line);border-radius:8px}.dns{border-top:1px solid var(--line)}details{margin-top:18px;border-top:1px solid var(--line);padding-top:8px}summary{color:var(--muted);cursor:pointer;user-select:none;font-size:12px}.technical{margin-top:6px;color:var(--muted);font-size:11.5px;line-height:1.35;display:grid;gap:2px}.technical div{margin:0}.technical .mono{font-size:10.8px}.note{margin-top:14px;color:var(--muted);font-size:11.5px}.status{min-height:68vh;display:grid;align-content:center}.status header{border-bottom:0}
+@media(max-width:520px){main{padding-left:12px;padding-right:12px;padding-top:max(20px,env(safe-area-inset-top))}.title{font-size:24px}.row{grid-template-columns:76px minmax(0,1fr);gap:9px;padding:6px 8px}.rulehead{align-items:flex-start}.domain{font-size:13px}.panel{border-radius:7px}.mono{font-size:10.8px}.ruletext{font-size:10.8px}}
+@media(max-width:360px){.row{grid-template-columns:1fr;gap:1px}.meta{justify-content:flex-start}.rulehead{display:block}.meta{margin-top:4px}}
 '''
 
 
@@ -562,15 +563,6 @@ class Handler(BaseHTTPRequestHandler):
             return value[1:value.index("]")].lower().rstrip(".")
         return value.split(":", 1)[0].lower().rstrip(".")
 
-    def local_origin(self):
-        try:
-            address = normalize_ip(str(self.connection.getsockname()[0]))
-        except Exception:
-            return ""
-        if not address or address in ("0.0.0.0", "::"):
-            return ""
-        return f"http://[{address}]" if ":" in address else f"http://{address}"
-
     def reply(self, code, body, content_type):
         self.send_response(code)
         self.send_header("Content-Type", content_type)
@@ -584,21 +576,6 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
-
-    def redirect_to_local(self, blocked_host):
-        origin = self.local_origin()
-        if not origin:
-            return False
-        location = origin + "/?blocked=" + urllib.parse.quote(blocked_host, safe="")
-        self.send_response(302)
-        self.send_header("Location", location)
-        self.send_header("Cache-Control", "no-store, max-age=0")
-        self.send_header("Content-Length", "0")
-        self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        self.close_connection = True
-        return True
 
     def no_content(self):
         self.send_response(204)
@@ -621,40 +598,23 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/healthz":
             body = b'{"ok":true}'
             self.reply(200, body, "application/json")
-            try:
-                self.wfile.write(body)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            try: self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError): pass
             return
         if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content()
-            return
-
+            self.no_content(); return
         host = self.request_host()
         client_ip = normalize_ip(self.client_address[0])
-        if host and not is_ip(host):
-            if self.redirect_to_local(host):
-                return
-            blocked = host
-
-        if blocked:
-            body = render_blocked(blocked, device_info(client_ip), block_details(blocked, client_ip))
-        else:
-            body = render_status(host or "block page")
+        if host and not is_ip(host): blocked = host
+        body = render_blocked(blocked, device_info(client_ip), block_details(blocked, client_ip)) if blocked else render_status(host or "block page")
         self.reply(200, body, "text/html; charset=utf-8")
-        try:
-            self.wfile.write(body)
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        try: self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError): pass
 
     def do_HEAD(self):
         path, blocked = self.parse_request_target()
-        host = self.request_host()
         if path in ("/favicon.ico", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.no_content()
-            return
-        if host and not is_ip(host) and self.redirect_to_local(host):
-            return
+            self.no_content(); return
         self.reply(200, b"", "text/html; charset=utf-8")
 
     def log_message(self, fmt, *args):
