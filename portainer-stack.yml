@@ -5,12 +5,13 @@ services:
     restart: unless-stopped
     network_mode: host
     # Read AdGuard's existing work/config mounts directly, but never write to them.
+    # Set AGH_CONTAINER_NAME in Portainer if your AdGuard container is not named adguardhome.
     volumes_from:
       - "container:adguard-asus:ro"
     command:
       - sh
       - -c
-      - wget -qO /tmp/app.py "https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/main/app.py?cb=$$(date +%s)" && python /tmp/app.py
+      - wget -qO /tmp/app.py https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/main/app.py && python /tmp/app.py
     environment:
       AGH_URL: "${AGH_URL}"
       AGH_USERNAME: "${AGH_USERNAME}"
@@ -27,7 +28,6 @@ services:
       - ALL
     cap_add:
       - NET_BIND_SERVICE
-      - DAC_READ_SEARCH
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
       interval: 30s
