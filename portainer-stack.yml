@@ -4,14 +4,17 @@ services:
     container_name: adguard-home-blockpage
     restart: unless-stopped
     network_mode: host
-    # Read AdGuard's existing work/config mounts directly, but never write to them.
-    # Set AGH_CONTAINER_NAME in Portainer if your AdGuard container is not named adguardhome.
+
+    # Reuse AdGuard Home's existing mounts read-only.
     volumes_from:
       - "container:adguard-asus:ro"
+
+    # Pin the browser-confirmed working v0.9.8 app instead of following main.
     command:
       - sh
       - -c
-      - wget -qO /tmp/app.py https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/main/app.py && python /tmp/app.py
+      - wget -qO /tmp/app.py https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/9cfde6d95903fd78e5cf10c504b276345ec3f9d0/app.py && python /tmp/app.py
+
     environment:
       AGH_URL: "${AGH_URL}"
       AGH_USERNAME: "${AGH_USERNAME}"
@@ -19,15 +22,22 @@ services:
       AGH_QUERYLOG_FILE: "/opt/adguardhome/work/data/querylog.json"
       AGH_CONFIG_FILE: "/opt/adguardhome/conf/AdGuardHome.yaml"
       PORT: "80"
+
     read_only: true
+
     tmpfs:
       - /tmp
+
     security_opt:
       - no-new-privileges:true
+
     cap_drop:
       - ALL
+
     cap_add:
       - NET_BIND_SERVICE
+      - DAC_READ_SEARCH
+
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1/healthz"]
       interval: 30s
