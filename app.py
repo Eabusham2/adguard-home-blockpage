@@ -6,6 +6,8 @@ import json
 import os
 import re
 import socket
+import struct
+import threading
 import subprocess
 import time
 import urllib.error
@@ -20,7 +22,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.9.8-r1"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -1115,4 +1117,35 @@ class DualStackServer(ThreadingHTTPServer):
         super().server_bind()
 
 
+def reject_https_probes(port=443):
+    """Immediately reset HTTPS probes so HTTPS-upgrade browsers can fall back to HTTP.
+
+    This is intentionally not a TLS server: no certificate, decryption, or interception.
+    """
+    sock = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        except OSError:
+            pass
+        sock.bind(("::", port))
+        sock.listen(64)
+        while True:
+            conn, _ = sock.accept()
+            try:
+                conn.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            except OSError:
+                pass
+            conn.close()
+    except Exception as exc:
+        print(f"HTTPS reject listener unavailable on port {port}: {type(exc).__name__}: {exc}", flush=True)
+    finally:
+        try:
+            sock.close()
+        except Exception:
+            pass
+
+
+threading.Thread(target=reject_https_probes, name="https-reject", daemon=True).start()
 DualStackServer(("::", PORT), Handler).serve_forever()
