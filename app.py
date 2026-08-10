@@ -21,7 +21,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.13"
+APP_VERSION = "0.9.14"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -267,17 +267,31 @@ def filter_names():
 
 
 def user_filter_rules(force=False):
-    local_rules, local_error = local_user_filter_rules()
-    if local_rules is not None:
-        CACHE["user_rules"] = local_rules
-        CACHE["user_rules_source"] = "local config"
-        CACHE["user_rules_error"] = ""
-        return list(local_rules)
-
-    CACHE["user_rules_source"] = "filtering API fallback"
-    CACHE["user_rules_error"] = local_error
+    # Use AdGuard's live filtering state as well as the on-disk config.  The live
+    # state is authoritative for what AdGuard is actually using right now, while
+    # the local file remains a useful fallback and can contain rules before/after
+    # an API refresh.  Merge both so the block page does not miss a Custom rule.
     refresh_filter_state(force)
-    return list(CACHE.get("user_rules") or [])
+    api_rules = [str(x).strip() for x in (CACHE.get("user_rules") or []) if str(x).strip()]
+
+    local_rules, local_error = local_user_filter_rules()
+    merged = []
+    for rule in (local_rules or []) + api_rules:
+        rule = str(rule).strip()
+        if rule and rule not in merged:
+            merged.append(rule)
+
+    if local_rules is not None and api_rules:
+        source = "local config + filtering API"
+    elif local_rules is not None:
+        source = "local config"
+    else:
+        source = "filtering API"
+
+    CACHE["user_rules"] = merged
+    CACHE["user_rules_source"] = source
+    CACHE["user_rules_error"] = "" if local_rules is not None else local_error
+    return list(merged)
 
 
 def normalized_rule_text(value):
