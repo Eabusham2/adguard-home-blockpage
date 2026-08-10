@@ -21,7 +21,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.10"
+APP_VERSION = "0.9.11"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -52,6 +52,8 @@ CACHE = {
     "user_rules": [],
     "filter_state_bases": [],
     "filter_state_errors": [],
+    "querylog_tail_key": None,
+    "querylog_tail_lines": [],
 }
 
 
@@ -484,7 +486,7 @@ def device_info(client_ip):
 
     if not info["name"]:
         for address in list(info["addresses"]):
-            name = name_from_clients_search(address) or name_from_querylog(address)
+            name = name_from_clients_search(address)
             if name:
                 info["name"] = name
                 break
@@ -563,17 +565,28 @@ def custom_rule_types(rule):
 
 
 def tail_json_lines(path, max_bytes):
-    """Read only the newest bounded chunk of a JSON-lines file."""
+    """Read a bounded newest chunk, cached by file size/mtime.
+
+    One DNS request can cause device/rule enrichment to run close together.  Avoid
+    rereading the same AdGuard query-log chunk more than once.
+    """
+    st = os.stat(path)
+    limit = max(4096, int(max_bytes))
+    key = (path, st.st_size, st.st_mtime_ns, limit)
+    if CACHE.get("querylog_tail_key") == key:
+        return list(CACHE.get("querylog_tail_lines") or [])
     with open(path, "rb") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        start = max(0, size - max(4096, int(max_bytes)))
+        size = st.st_size
+        start = max(0, size - limit)
         f.seek(start)
-        data = f.read()
+        data = f.read(limit)
     if start > 0:
         nl = data.find(b"\n")
         data = b"" if nl < 0 else data[nl + 1:]
-    return data.splitlines()
+    lines = data.splitlines()
+    CACHE["querylog_tail_key"] = key
+    CACHE["querylog_tail_lines"] = lines
+    return list(lines)
 
 
 DNS_TYPE_NAMES = {
@@ -1103,6 +1116,7 @@ class Handler(BaseHTTPRequestHandler):
 
         host = self.request_host()
         client_ip = normalize_ip(self.client_address[0])
+        print(f"{client_ip} - BEGIN GET {host or self.path}", flush=True)
         if host and not is_ip(host):
             body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
         else:
