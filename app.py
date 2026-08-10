@@ -20,7 +20,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.8"
+APP_VERSION = "0.9.8-stackfix"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -410,26 +410,7 @@ def name_from_clients_search(client_ip):
 
 
 def name_from_querylog(client_ip):
-    # Best-effort only.  The on-disk format normally stores the client IP rather
-    # than the resolved runtime name, so other client/neighbor/rDNS sources remain
-    # primary.  Crucially, this never calls the Query Log HTTP API.
-    try:
-        lines = tail_json_lines(AGH_QUERYLOG_FILE, min(LOCAL_QUERYLOG_TAIL_BYTES, 524288))
-    except Exception:
-        return ""
-    target = normalize_ip(client_ip)
-    for raw in reversed(lines):
-        try:
-            entry = json.loads(raw)
-        except Exception:
-            continue
-        logged = normalize_ip(str(entry.get("IP") or entry.get("client") or ""))
-        if logged and logged != target:
-            continue
-        for key in ("ClientName", "client_name", "clientName"):
-            name = str(entry.get(key) or "").strip()
-            if name:
-                return name
+    # Match the last working deployment: querylog was unreadable, so skip it.
     return ""
 
 
@@ -628,35 +609,8 @@ def local_log_entry(entry):
 
 
 def local_querylog_matches(host, client_ip):
-    errors = []
-    path = AGH_QUERYLOG_FILE
-    if not path:
-        return [], ["local query log path is empty"]
-    try:
-        lines = tail_json_lines(path, LOCAL_QUERYLOG_TAIL_BYTES)
-    except Exception as exc:
-        return [], [f"{type(exc).__name__}: {exc}"]
-
-    target_host = str(host or "").lower().rstrip(".")
-    target_client = normalize_ip(client_ip)
-    exact = []
-    # Newest first.  A partially-written final line is harmless and skipped.
-    for raw in reversed(lines):
-        if not raw.strip():
-            continue
-        try:
-            entry = json.loads(raw)
-        except Exception:
-            continue
-        qhost, qtype, logged_client, converted = local_log_entry(entry)
-        if qhost != target_host:
-            continue
-        score = 1 if logged_client and logged_client == target_client else 0
-        exact.append((score, qtype, converted))
-        if len(exact) >= 12:
-            break
-    exact.sort(key=lambda x: x[0], reverse=True)
-    return exact[:8], errors
+    # Match the last working deployment: querylog was unreadable, so skip it.
+    return [], ["local query log intentionally disabled for stack compatibility"]
 
 
 def check_host(host, client_ip, qtype):
