@@ -21,7 +21,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.11"
+APP_VERSION = "0.9.12"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -697,22 +697,13 @@ def local_querylog_matches(host, client_ip):
     exact.sort(key=lambda x: x[0], reverse=True)
     return exact[:12], []
 
-def check_host(host, client_ip, qtype):
-    attempts = []
-    variants = [
-        {"name": host, "client": client_ip, "qtype": qtype},
-        {"name": host, "qtype": qtype},
-    ]
-    for params in variants:
-        try:
-            data = api_get("/control/filtering/check_host", params, timeout=2.5)
-            if isinstance(data, dict):
-                return data, attempts
-            attempts.append("Invalid JSON response")
-        except Exception as exc:
-            attempts.append(api_error_text(exc))
-    return {}, attempts
-
+def check_host(host, qtype):
+    """Fast, client-independent filter check used by the live block page."""
+    try:
+        data = api_get("/control/filtering/check_host", {"name": host, "qtype": qtype}, timeout=1.5)
+        return (data if isinstance(data, dict) else {}), []
+    except Exception as exc:
+        return {}, [api_error_text(exc)]
 
 def check_host_plain(host):
     try:
@@ -836,7 +827,7 @@ def block_details(host, client_ip):
                 merge_types(item["types"], qtype)
 
     for qtype in ("A", "AAAA"):
-        data, errors = check_host(host, client_ip, qtype)
+        data, errors = check_host(host, qtype)
         for error in errors:
             entry = f"{qtype}: {error}"
             if entry not in api_errors:
@@ -851,21 +842,8 @@ def block_details(host, client_ip):
                 api_errors.append(entry)
         ingest(data, "")
 
-    # The DNS query necessarily happened before this HTTP block page loaded.
-    # Inspect the on-disk Query Log directly as well as check_host.  This deliberately
-    # avoids the Query Log HTTP API, which can be expensive on a busy or unhealthy AdGuard
-    # instance.  A local record with filter_list_id=0 is authoritative custom-rule
-    # evidence.
-    logged, errors = local_querylog_matches(host, client_ip)
-    for error in errors:
-        entry = f"querylog: {error}"
-        if entry not in api_errors:
-            api_errors.append(entry)
-    if logged:
-        if not api_ok or not rules:
-            detail_source = "local query log"
-        for _, qtype, entry in logged:
-            ingest(entry, qtype if qtype in ("A", "AAAA") else "")
+    # Stability mode: do not read AdGuard's query log on the HTTP request path.
+    # check_host plus local user_rules provides the page details without delaying delivery.
 
     # AdGuard may report only one winning block-list rule even when the same host
     # also matches a user rule.  Explicitly surface matching user rules as Custom rule.
@@ -912,7 +890,8 @@ def block_details(host, client_ip):
         "user_rules_source": CACHE.get("user_rules_source", ""),
         "user_rules_error": CACHE.get("user_rules_error", ""),
         "querylog_file": AGH_QUERYLOG_FILE,
-        "querylog_local": os.path.isfile(AGH_QUERYLOG_FILE),
+        "querylog_local": False,
+        "querylog_disabled": True,
     }
     cache_key = host.casefold()
     if result["api_ok"]:
@@ -1029,7 +1008,7 @@ def render_blocked(host, device, details):
             technical.append(f'<div>AdGuard reason: <span class="mono">{esc(reason["raw"] + suffix)}</span></div>')
     if details.get("detail_source") == "local query log":
         technical.append('<div>Rule source: <span class="mono">local query log</span></div>')
-    technical.append(f'<div>Query log: <span class="mono">{"local file" if details.get("querylog_local") else "local file unavailable"}</span></div>')
+    technical.append(f'<div>Query log: <span class="mono">{"not used for page delivery" if details.get("querylog_disabled") else ("local file" if details.get("querylog_local") else "local file unavailable")}</span></div>')
     if details.get("user_rules_source"):
         technical.append(f'<div>Custom rules source: <span class="mono">{esc(details["user_rules_source"])}</span></div>')
     if details.get("user_rules_error"):
