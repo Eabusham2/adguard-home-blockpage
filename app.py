@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import ast
 import base64
 import html
 import ipaddress
@@ -20,7 +21,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.8-stackfix"
+APP_VERSION = "0.9.13"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -51,6 +52,8 @@ CACHE = {
     "user_rules": [],
     "filter_state_bases": [],
     "filter_state_errors": [],
+    "querylog_tail_key": None,
+    "querylog_tail_lines": [],
 }
 
 
@@ -165,12 +168,7 @@ def parse_yaml_scalar(value):
 
 
 def local_user_filter_rules():
-    """Read top-level user_rules directly from AdGuardHome.yaml.
-
-    Returns (rules, error).  rules is None when the config file isn't mounted or
-    readable; an empty list means the file was read successfully and contains no
-    custom rules.
-    """
+    """Read top-level user_rules directly from AdGuardHome.yaml."""
     try:
         with open(AGH_CONFIG_FILE, "r", encoding="utf-8", errors="replace") as f:
             lines = f.readlines()
@@ -180,15 +178,28 @@ def local_user_filter_rules():
     rules = []
     in_rules = False
     base_indent = 0
+    found = False
     for line in lines:
         raw = line.rstrip("\n\r")
         stripped = raw.strip()
         if not in_rules:
-            m = re.match(r"^(\s*)user_rules\s*:\s*$", raw)
+            m = re.match(r"^(\s*)user_rules\s*:\s*(.*?)\s*$", raw)
             if not m:
                 continue
-            in_rules = True
+            found = True
             base_indent = len(m.group(1))
+            inline = m.group(2).strip()
+            if inline:
+                if inline == "[]":
+                    return [], ""
+                if inline.startswith("[") and inline.endswith("]"):
+                    try:
+                        value = ast.literal_eval(inline)
+                        if isinstance(value, (list, tuple)):
+                            return [str(x).strip() for x in value if str(x).strip()], ""
+                    except Exception:
+                        pass
+            in_rules = True
             continue
         if not stripped or stripped.startswith("#"):
             continue
@@ -203,8 +214,7 @@ def local_user_filter_rules():
             rule = parse_yaml_scalar(value)
             if rule and rule not in rules:
                 rules.append(rule)
-    return rules, ""
-
+    return rules if found else None, "" if found else "user_rules not found in local config"
 
 def refresh_filter_state(force=False):
     now = time.time()
@@ -410,7 +420,26 @@ def name_from_clients_search(client_ip):
 
 
 def name_from_querylog(client_ip):
-    # Match the last working deployment: querylog was unreadable, so skip it.
+    # Best-effort only.  The on-disk format normally stores the client IP rather
+    # than the resolved runtime name, so other client/neighbor/rDNS sources remain
+    # primary.  Crucially, this never calls the Query Log HTTP API.
+    try:
+        lines = tail_json_lines(AGH_QUERYLOG_FILE, min(LOCAL_QUERYLOG_TAIL_BYTES, 524288))
+    except Exception:
+        return ""
+    target = normalize_ip(client_ip)
+    for raw in reversed(lines):
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        logged = normalize_ip(str(entry.get("IP") or entry.get("client") or ""))
+        if logged and logged != target:
+            continue
+        for key in ("ClientName", "client_name", "clientName"):
+            name = str(entry.get(key) or "").strip()
+            if name:
+                return name
     return ""
 
 
@@ -457,7 +486,7 @@ def device_info(client_ip):
 
     if not info["name"]:
         for address in list(info["addresses"]):
-            name = name_from_clients_search(address) or name_from_querylog(address)
+            name = name_from_clients_search(address)
             if name:
                 info["name"] = name
                 break
@@ -536,82 +565,137 @@ def custom_rule_types(rule):
 
 
 def tail_json_lines(path, max_bytes):
-    """Read only the newest bounded chunk of a JSON-lines file."""
+    """Read a bounded newest chunk, cached by file size/mtime.
+
+    One DNS request can cause device/rule enrichment to run close together.  Avoid
+    rereading the same AdGuard query-log chunk more than once.
+    """
+    st = os.stat(path)
+    limit = max(4096, int(max_bytes))
+    key = (path, st.st_size, st.st_mtime_ns, limit)
+    if CACHE.get("querylog_tail_key") == key:
+        return list(CACHE.get("querylog_tail_lines") or [])
     with open(path, "rb") as f:
-        f.seek(0, os.SEEK_END)
-        size = f.tell()
-        start = max(0, size - max(4096, int(max_bytes)))
+        size = st.st_size
+        start = max(0, size - limit)
         f.seek(start)
-        data = f.read()
+        data = f.read(limit)
     if start > 0:
         nl = data.find(b"\n")
         data = b"" if nl < 0 else data[nl + 1:]
-    return data.splitlines()
+    lines = data.splitlines()
+    CACHE["querylog_tail_key"] = key
+    CACHE["querylog_tail_lines"] = lines
+    return list(lines)
+
+
+DNS_TYPE_NAMES = {
+    1: "A",
+    2: "NS",
+    5: "CNAME",
+    12: "PTR",
+    15: "MX",
+    16: "TXT",
+    28: "AAAA",
+    33: "SRV",
+    64: "SVCB",
+    65: "HTTPS",
+}
+
+
+def normalize_qtype(value):
+    if value is None:
+        return ""
+    if isinstance(value, int):
+        return DNS_TYPE_NAMES.get(value, str(value))
+    text = str(value).strip().upper()
+    if text.isdigit():
+        return DNS_TYPE_NAMES.get(int(text), text)
+    return text
 
 
 def local_log_entry(entry):
-    """Convert AdGuard's on-disk querylog JSON shape to the API-like shape."""
+    """Convert AdGuard's on-disk compact JSON record to an API-like record.
+
+    Disk records use QH/QT/IP and Result.{Rule,FilterID}; API records use
+    question/client/rules.  Support both so upgrades remain compatible.
+    """
     if not isinstance(entry, dict):
         return "", "", "", {}
 
-    host = str(entry.get("QH") or "").lower().rstrip(".")
-    qtype = str(entry.get("QT") or "").upper()
-    client = normalize_ip(str(entry.get("IP") or ""))
-    question = entry.get("question") or {}
-    if not host:
-        host = str(question.get("host") or question.get("name") or "").lower().rstrip(".")
-    if not qtype:
-        qtype = str(question.get("type") or "").upper()
-    if not client:
-        client = normalize_ip(str(entry.get("client") or ""))
+    question = entry.get("question") if isinstance(entry.get("question"), dict) else {}
+    host = str(entry.get("QH") or question.get("host") or question.get("name") or "").lower().rstrip(".")
+    qtype = normalize_qtype(entry.get("QT") if "QT" in entry else question.get("type"))
+    client = normalize_ip(str(entry.get("IP") or entry.get("client") or ""))
 
     result = entry.get("Result") if isinstance(entry.get("Result"), dict) else {}
-    reason = result.get("Reason", entry.get("reason", ""))
     service = str(result.get("ServiceName") or result.get("Service") or entry.get("service_name") or "").strip()
 
+    rules = []
     raw_rules = result.get("Rules") or result.get("rules") or entry.get("rules") or []
     if isinstance(raw_rules, dict):
         raw_rules = [raw_rules]
-    rules = []
     for rule in raw_rules:
         if isinstance(rule, str):
-            text, fid = rule, None
+            rule_text, fid = rule.strip(), None
         elif isinstance(rule, dict):
-            text = str(rule.get("Text") or rule.get("text") or rule.get("Rule") or rule.get("rule") or "").strip()
+            rule_text = str(rule.get("Text") or rule.get("text") or rule.get("Rule") or rule.get("rule") or "").strip()
             fid = rule.get("FilterListID", rule.get("FilterID", rule.get("filter_list_id", rule.get("filter_id"))))
         else:
             continue
-        if text:
-            rules.append({"text": text, "filter_list_id": fid})
+        if rule_text:
+            rules.append({"text": rule_text, "filter_list_id": fid})
 
+    # This is the documented on-disk compact form.
     if not rules:
-        text = str(result.get("Rule") or entry.get("rule") or "").strip()
+        rule_text = str(result.get("Rule") or entry.get("rule") or "").strip()
         fid = result.get("FilterID", result.get("FilterId", entry.get("filter_id", entry.get("filterId"))))
-        if text:
-            rules.append({"text": text, "filter_list_id": fid})
+        if rule_text:
+            rules.append({"text": rule_text, "filter_list_id": fid})
 
-    if isinstance(reason, str):
-        reason_name = reason.strip()
-    else:
-        reason_name = ""
+    raw_reason = result.get("Reason", entry.get("reason", ""))
+    reason_name = raw_reason.strip() if isinstance(raw_reason, str) else ""
     if not reason_name:
         if service:
             reason_name = "FilteredBlockedService"
         elif rules or result.get("IsFiltered"):
             reason_name = "FilteredBlackList"
 
-    converted = {
+    return host, qtype, client, {
         "reason": reason_name,
         "rules": rules,
         "service_name": service,
     }
-    return host, qtype, client, converted
 
 
 def local_querylog_matches(host, client_ip):
-    # Match the last working deployment: querylog was unreadable, so skip it.
-    return [], ["local query log intentionally disabled for stack compatibility"]
+    path = AGH_QUERYLOG_FILE
+    if not path:
+        return [], ["local query log path is empty"]
+    try:
+        lines = tail_json_lines(path, LOCAL_QUERYLOG_TAIL_BYTES)
+    except Exception as exc:
+        return [], [f"{type(exc).__name__}: {exc}"]
 
+    target_host = str(host or "").lower().rstrip(".")
+    target_client = normalize_ip(client_ip)
+    exact = []
+    for raw in reversed(lines):
+        if not raw.strip():
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        qhost, qtype, logged_client, converted = local_log_entry(entry)
+        if qhost != target_host:
+            continue
+        score = 2 if logged_client and logged_client == target_client else 1
+        exact.append((score, qtype, converted))
+        if len(exact) >= 16:
+            break
+    exact.sort(key=lambda x: x[0], reverse=True)
+    return exact[:12], []
 
 def check_host(host, client_ip, qtype):
     attempts = []
@@ -822,7 +906,7 @@ def block_details(host, client_ip):
         "stale": False,
         "detail_source": detail_source,
         "custom_rule_count": len(current_user_rules),
-        "custom_match": any(custom_rule_matches_host(x, host) for x in current_user_rules),
+        "custom_match": bool(custom_texts) or any(custom_rule_matches_host(x, host) for x in current_user_rules),
         "filter_state_bases": list(CACHE.get("filter_state_bases") or []),
         "filter_state_errors": list(CACHE.get("filter_state_errors") or []),
         "user_rules_source": CACHE.get("user_rules_source", ""),
@@ -851,13 +935,13 @@ def esc(value):
 CSS = r'''
 :root{color-scheme:light dark;--bg:#fff;--text:#1b1b1b;--muted:#747474;--line:#e1e1e1;--soft:#f7f7f7;--code:#f4f4f4}
 @media(prefers-color-scheme:dark){:root{--bg:#171717;--text:#f1f1f1;--muted:#aaa;--line:#383838;--soft:#1f1f1f;--code:#222}}
-*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:15.5px/1.42 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
-main{width:min(710px,100%);margin:0 auto;padding:max(32px,env(safe-area-inset-top)) max(18px,env(safe-area-inset-right)) max(34px,env(safe-area-inset-bottom)) max(18px,env(safe-area-inset-left))}
-header{padding-bottom:19px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 4px;color:var(--muted);font-size:12.5px;font-weight:650}.title{margin:0;font-size:31px;line-height:1.08;letter-spacing:-.02em;font-weight:680}.lead{margin:6px 0 0;color:var(--muted)}.domain{margin-top:13px;padding:9px 11px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font:600 16px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-section{margin-top:21px}.section-title{margin:0 0 7px;font-size:15px;font-weight:680}.panel{border:1px solid var(--line);border-radius:9px;overflow:hidden}.row{display:grid;grid-template-columns:102px minmax(0,1fr);gap:13px;padding:9px 12px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.rule{padding:11px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:8px 12px;align-items:center}.filter{font-weight:650;line-height:1.25}.meta{display:flex;gap:5px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:1px 6px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:11px;line-height:1.6;white-space:nowrap}.ruletext{margin-top:6px;padding:8px 10px;background:var(--code);border-radius:6px;font:13px/1.4 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
-.fallback{padding:9px 11px;border:1px solid var(--line);border-radius:8px}details{margin-top:19px;border-top:1px solid var(--line);padding-top:9px}summary{color:var(--muted);cursor:pointer;font-size:13px}.technical{margin-top:6px;color:var(--muted);font-size:11.75px;line-height:1.32;display:grid;gap:2px}.technical div{margin:0;overflow-wrap:anywhere}.technical .mono{font-size:11.25px}.note{margin-top:12px;color:var(--muted);font-size:11.75px}.status{min-height:68vh;display:grid;align-content:center}.status header{border-bottom:0}
-@media(max-width:520px){main{padding-left:14px;padding-right:14px;padding-top:max(24px,env(safe-area-inset-top))}.title{font-size:28.5px}.row{grid-template-columns:86px minmax(0,1fr);gap:9px;padding:8px 9px}.domain{font-size:15.25px}.mono,.ruletext{font-size:12.2px}.section-title{font-size:14.5px}}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}body{margin:0;background:var(--bg);color:var(--text);font:14.5px/1.4 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{width:min(680px,100%);margin:0 auto;padding:max(28px,env(safe-area-inset-top)) max(16px,env(safe-area-inset-right)) max(30px,env(safe-area-inset-bottom)) max(16px,env(safe-area-inset-left))}
+header{padding-bottom:17px;border-bottom:1px solid var(--line)}.eyebrow{margin:0 0 3px;color:var(--muted);font-size:11.75px;font-weight:650}.title{margin:0;font-size:28.5px;line-height:1.08;letter-spacing:-.02em;font-weight:680}.lead{margin:5px 0 0;color:var(--muted)}.domain{margin-top:11px;padding:8px 10px;background:var(--soft);border:1px solid var(--line);border-radius:8px;font:600 15px/1.35 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+section{margin-top:18px}.section-title{margin:0 0 6px;font-size:14px;font-weight:680}.panel{border:1px solid var(--line);border-radius:8px;overflow:hidden}.row{display:grid;grid-template-columns:94px minmax(0,1fr);gap:11px;padding:8px 10px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:12.25px/1.36 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.rule{padding:9px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:7px 10px;align-items:center}.filter{font-weight:650;line-height:1.22}.meta{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:1px 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10.25px;line-height:1.55;white-space:nowrap}.ruletext{margin-top:5px;padding:7px 9px;background:var(--code);border-radius:6px;font:12.25px/1.36 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+.fallback{padding:8px 10px;border:1px solid var(--line);border-radius:8px}details{margin-top:16px;border-top:1px solid var(--line);padding-top:8px}summary{color:var(--muted);cursor:pointer;font-size:12px}.technical{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.3;display:grid;gap:2px}.technical div{margin:0;overflow-wrap:anywhere}.technical .mono{font-size:10.75px}.note{margin-top:10px;color:var(--muted);font-size:11px}.status{min-height:68vh;display:grid;align-content:center}.status header{border-bottom:0}
+@media(max-width:520px){main{padding-left:12px;padding-right:12px;padding-top:max(21px,env(safe-area-inset-top))}.title{font-size:26.5px}.row{grid-template-columns:80px minmax(0,1fr);gap:8px;padding:7px 8px}.domain{font-size:14px}.mono,.ruletext{font-size:11.5px}.section-title{font-size:13.5px}}
 @media(max-width:340px){.row{grid-template-columns:1fr;gap:2px}.rulehead{display:block}.meta{justify-content:flex-start;margin-top:4px}}
 '''
 
@@ -880,10 +964,10 @@ def display_device_name(name):
 FAVICON_SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><rect width="64" height="64" rx="14" fill="#b3261e"/><path d="M18 21h28v7H18zm0 15h28v7H18z" fill="#fff"/></svg>'
 FAVICON_ICO = base64.b64decode("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")
 FAVICON_PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAA4UlEQVR4nO2ZwQ2DQAzAQtU56K8sw7btMjw7SftigYTKkWL/D3zWCURYXs/1G4O50QI0BqAFaAxAC9AYgBagMQAtQGMAWoDGALQAjQFoARoD0AI0BqAFaO7VC+zH5wqPEu/tkV5bOgEdNh9R80gH6LL5k6zP+GeAAWgBGgNkF1ZePf8g61M6AV0iVDwWf44OxwC0AI0BaAGa8QGcB1Ru3GHzEc4DIsJ5QBoD0AI0Bsgu7PIpfOI8IInzAFqAxgC0AI0BaAEaA9ACNAagBWgMQAvQGIAWoDEALUBjAFqAZnyAH3WsJGSOMuO1AAAAAElFTkSuQmCC")
-FAVICON_DATA_URI = "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCI+PHJlY3Qgd2lkdGg9IjY0IiBoZWlnaHQ9IjY0IiByeD0iMTQiIGZpbGw9IiNiMzI2MWUiLz48cGF0aCBkPSJNMTggMjFoMjh2N0gxOHptMCAxNWgyOHY3SDE4eiIgZmlsbD0iI2ZmZiIvPjwvc3ZnPg=="
+FAVICON_DATA_URI = "data:image/png;base64," + base64.b64encode(FAVICON_PNG).decode("ascii")
 
 def render_status(host):
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=098"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=098"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=098"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=098"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="{FAVICON_DATA_URI}"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=0913"><link rel="shortcut icon" href="/favicon.ico?v=0913"><link rel="apple-touch-icon" href="/favicon.png?v=0913"><meta name="theme-color" content="#b3261e"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
 def render_blocked(host, device, details):
@@ -963,7 +1047,7 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/x-icon" sizes="32x32" href="/favicon.ico?v=098"><link rel="shortcut icon" type="image/x-icon" href="/favicon.ico?v=098"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=098"><link rel="icon" type="image/svg+xml" href="/favicon.svg?v=098"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="{FAVICON_DATA_URI}"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=0913"><link rel="shortcut icon" href="/favicon.ico?v=0913"><link rel="apple-touch-icon" href="/favicon.png?v=0913"><meta name="theme-color" content="#b3261e"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -987,6 +1071,21 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.close_connection = True
 
+    def asset_reply(self, body, content_type, head=False):
+        self.send_response(200)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=31536000, immutable")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        self.close_connection = True
+        if not head:
+            try:
+                self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
     def no_content(self):
         self.send_response(204)
         self.send_header("Cache-Control", "no-store, max-age=0")
@@ -1006,29 +1105,18 @@ class Handler(BaseHTTPRequestHandler):
                 pass
             return
         if path == "/favicon.svg":
-            self.reply(200, FAVICON_SVG, "image/svg+xml")
-            try:
-                self.wfile.write(FAVICON_SVG)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_SVG, "image/svg+xml")
             return
         if path == "/favicon.ico":
-            self.reply(200, FAVICON_ICO, "image/x-icon")
-            try:
-                self.wfile.write(FAVICON_ICO)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_ICO, "image/x-icon")
             return
         if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.reply(200, FAVICON_PNG, "image/png")
-            try:
-                self.wfile.write(FAVICON_PNG)
-            except (BrokenPipeError, ConnectionResetError):
-                pass
+            self.asset_reply(FAVICON_PNG, "image/png")
             return
 
         host = self.request_host()
         client_ip = normalize_ip(self.client_address[0])
+        print(f"{client_ip} - BEGIN GET {host or self.path}", flush=True)
         if host and not is_ip(host):
             body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
         else:
@@ -1042,13 +1130,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self):
         path = urllib.parse.urlsplit(self.path).path
         if path == "/favicon.svg":
-            self.reply(200, b"", "image/svg+xml")
+            self.asset_reply(FAVICON_SVG, "image/svg+xml", head=True)
             return
         if path == "/favicon.ico":
-            self.reply(200, b"", "image/x-icon")
+            self.asset_reply(FAVICON_ICO, "image/x-icon", head=True)
             return
         if path in ("/favicon.png", "/apple-touch-icon.png", "/apple-touch-icon-precomposed.png"):
-            self.reply(200, b"", "image/png")
+            self.asset_reply(FAVICON_PNG, "image/png", head=True)
             return
         self.reply(200, b"", "text/html; charset=utf-8")
 
