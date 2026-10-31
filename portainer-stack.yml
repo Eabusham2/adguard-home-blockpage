@@ -1,24 +1,37 @@
 services:
   blockpage:
     image: python:3.13-alpine
+    pull_policy: never
     container_name: adguard-home-blockpage
     restart: unless-stopped
     network_mode: host
 
-    # Keep AdGuard mounts read-only for client and rule details.
+    # Keep the old DNS fallback for downloading code during AdGuard outages.
+    dns:
+      - 192.168.50.133
+      - 1.1.1.1
+
+    # Read AdGuard's existing query logs and configuration, without modifying them.
     volumes_from:
       - "container:adguard-asus:ro"
 
-    # Fetch tested source from one immutable Git commit; no AdGuard restart.
+    # Pin the verified v0.9.15 source; retry all four downloads if GitHub/DNS fails.
+    # Only this block-page container is changed; AdGuard is never restarted.
     command:
       - sh
       - -ec
       - |
+        echo "Starting AdGuard block page..."
         SRC=https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/8cbc283a840065d04f671aa86bf8d0fb84aa467b
-        wget -qO /tmp/app.py "$SRC/app.py"
-        wget -qO /tmp/unblock.py "$SRC/unblock.py"
-        wget -qO /tmp/memory_guard.py "$SRC/memory_guard.py"
-        wget -qO /tmp/unblock_ui.py "$SRC/unblock_ui.py"
+        until wget -q -T 15 -O /tmp/app.py "$$SRC/app.py" \
+          && wget -q -T 15 -O /tmp/unblock.py "$$SRC/unblock.py" \
+          && wget -q -T 15 -O /tmp/memory_guard.py "$$SRC/memory_guard.py" \
+          && wget -q -T 15 -O /tmp/unblock_ui.py "$$SRC/unblock_ui.py"; do
+          echo "DNS/GitHub unavailable - retrying in 5 seconds..."
+          sleep 5
+        done
+        python -m py_compile /tmp/app.py /tmp/unblock.py /tmp/memory_guard.py /tmp/unblock_ui.py
+        echo "Downloaded and verified v0.9.15 - starting..."
         exec python -u /tmp/app.py
 
     environment:
@@ -35,7 +48,7 @@ services:
     tmpfs:
       - /tmp:size=16m,mode=1777
 
-    # Read-only host process and cgroup visibility for RAM protection.
+    # Conservative memory-check access; no Docker socket or AdGuard writes.
     cgroup: host
     volumes:
       - /proc:/host-proc:ro
