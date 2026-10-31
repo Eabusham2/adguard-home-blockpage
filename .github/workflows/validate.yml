@@ -1,0 +1,29 @@
+name: Validate block page
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile modules and smoke-test unblock controls
+        run: |
+          python -m py_compile app.py unblock.py unblock_ui.py memory_guard.py
+          python - <<'PY'
+          import unblock_ui
+          from unblock import normalize_host
+          assert normalize_host("Example.COM") == "example.com"
+          assert not unblock_ui.client_may_unblock("8.8.8.8")
+          assert unblock_ui.client_may_unblock("192.168.50.42")
+          markup = unblock_ui.render_controls("example.com", "192.168.50.42")
+          assert 'id="unblock"' in markup and 'data-token="' in markup
+          assert "Refresh page" in unblock_ui.render_controls("example.com", "192.168.50.42", True)
+          assert not unblock_ui.valid_token("bogus", "example.com", "192.168.50.42")
+          print("Unblock UI smoke tests passed")
+          PY

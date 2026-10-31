@@ -5,15 +5,21 @@ services:
     restart: unless-stopped
     network_mode: host
 
-    # Reuse AdGuard Home's existing mounts read-only.
+    # Keep AdGuard mounts read-only for client and rule details.
     volumes_from:
       - "container:adguard-asus:ro"
 
-    # Pin the browser-confirmed working v0.9.8 app instead of following main.
+    # Fetch tested source from one immutable Git commit; no AdGuard restart.
     command:
       - sh
-      - -c
-      - wget -qO /tmp/app.py https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/9cfde6d95903fd78e5cf10c504b276345ec3f9d0/app.py && python /tmp/app.py
+      - -ec
+      - |
+        SRC=https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/8cbc283a840065d04f671aa86bf8d0fb84aa467b
+        wget -qO /tmp/app.py "$SRC/app.py"
+        wget -qO /tmp/unblock.py "$SRC/unblock.py"
+        wget -qO /tmp/memory_guard.py "$SRC/memory_guard.py"
+        wget -qO /tmp/unblock_ui.py "$SRC/unblock_ui.py"
+        exec python -u /tmp/app.py
 
     environment:
       AGH_URL: "${AGH_URL}"
@@ -21,19 +27,27 @@ services:
       AGH_PASSWORD: "${AGH_PASSWORD}"
       AGH_QUERYLOG_FILE: "/opt/adguardhome/work/data/querylog.json"
       AGH_CONFIG_FILE: "/opt/adguardhome/conf/AdGuardHome.yaml"
+      UNBLOCK_ALLOWED_NETWORKS: "${UNBLOCK_ALLOWED_NETWORKS:-192.168.50.0/24,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}"
+      UNBLOCK_STATE_DIR: "/state"
       PORT: "80"
 
     read_only: true
-
     tmpfs:
-      - /tmp
+      - /tmp:size=16m,mode=1777
 
+    # Read-only host process and cgroup visibility for RAM protection.
+    cgroup: host
+    volumes:
+      - /proc:/host-proc:ro
+      - /sys/fs/cgroup:/host-cgroup:ro
+      - unblock_state:/state
+
+    mem_limit: 128m
+    pids_limit: 32
     security_opt:
       - no-new-privileges:true
-
     cap_drop:
       - ALL
-
     cap_add:
       - NET_BIND_SERVICE
       - DAC_READ_SEARCH
@@ -43,3 +57,6 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+volumes:
+  unblock_state: {}
