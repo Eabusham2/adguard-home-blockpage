@@ -12,6 +12,30 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - name: Validate merged Portainer Compose file
+        env:
+          AGH_URL: http://192.168.50.133:3000
+          AGH_USERNAME: ci-example
+          AGH_PASSWORD: ci-example
+        run: |
+          docker compose -f portainer-stack.yml config --quiet
+          docker compose -f portainer-stack.yml config --format json > /tmp/adguard-portainer-config.json
+          python - <<'PY'
+          import json
+          data = json.load(open("/tmp/adguard-portainer-config.json"))
+          assert set(data["services"]) == {"blockpage"}
+          block = data["services"]["blockpage"]
+          assert block["image"] == "python:3.13-alpine"
+          assert block["pull_policy"] == "never"
+          assert block["network_mode"] == "host"
+          assert block["dns"] == ["192.168.50.133", "1.1.1.1"]
+          assert block["read_only"] is True
+          command = block["command"][-1]
+          assert "8cbc283a840065d04f671aa86bf8d0fb84aa467b" in command
+          for filename in ("app.py", "unblock.py", "memory_guard.py", "unblock_ui.py"):
+              assert filename in command
+          print("Portainer Compose configuration valid")
+          PY
       - name: Compile modules and smoke-test unblock controls
         run: |
           python -m py_compile app.py unblock.py unblock_ui.py memory_guard.py
