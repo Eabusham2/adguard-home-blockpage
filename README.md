@@ -56,3 +56,33 @@ This is an HTTP block page. A transparent custom page for arbitrary HTTPS sites 
 ## License
 
 MIT
+
+
+## Unblock button (v0.9.15)
+
+Blocked HTTP pages now have an **Unblock** button on authorized LAN networks.
+It adds a custom AdGuard allowlist exception for the displayed hostname and its
+subdomains, for **all clients**. After AdGuard confirms the exception, the page
+shows **Unblocked. Refresh the page.** DNS responses cached by a client may
+remain old; if the blocked page returns, wait and refresh again.
+
+**RAM safety:** AdGuard's custom-rule API rebuilds filtering engines, even if
+AdGuard is not restarted. The backend checks host and AdGuard process/container
+memory headroom, serializes mutations, imposes a cooldown, preserves the old
+custom rules and pending state, and never retries an uncertain write. If the
+memory check fails, it changes nothing. No memory preflight can guarantee that
+a filter rebuild will never exceed available RAM. The button does not restart
+AdGuard, refresh subscribed blocklists, edit YAML, or delete filter caches.
+
+**Security:** Any device on an allowed network can whitelist a site for all
+devices. The default is the trusted 192.168.50.0/24 LAN, loopback, private/link-
+local IPv6, and the host's detected on-link IPv6 network. Restrict the
+UNBLOCK_ALLOWED_NETWORKS environment variable to administrator devices if
+other LAN users should not be able to unblock. Do not expose this HTTP service
+to the Internet. The action uses same-origin requests, short-lived client-
+bound tokens, and server-side AdGuard credentials.
+
+The Portainer stack must have read-only host /proc and cgroup mounts, cgroup
+namespace host, and a persistent named unblock_state volume so a crash cannot
+replay an uncertain whitelist write. The app requires modern Docker Compose
+support for the cgroup service property. See the deployment file for details.

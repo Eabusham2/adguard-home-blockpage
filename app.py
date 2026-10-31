@@ -2,6 +2,7 @@
 import ast
 import base64
 import html
+import unblock_ui
 import ipaddress
 import json
 import os
@@ -21,7 +22,7 @@ PORT = int(os.getenv("PORT", "80"))
 AGH_QUERYLOG_FILE = os.getenv("AGH_QUERYLOG_FILE", "/opt/adguardhome/work/data/querylog.json")
 AGH_CONFIG_FILE = os.getenv("AGH_CONFIG_FILE", "/opt/adguardhome/conf/AdGuardHome.yaml")
 LOCAL_QUERYLOG_TAIL_BYTES = int(os.getenv("AGH_QUERYLOG_TAIL_BYTES", "1048576"))
-APP_VERSION = "0.9.14"
+APP_VERSION = "0.9.15"
 
 FRIENDLY_REASONS = {
     "FilteredBlackList": "DNS blocklist",
@@ -955,6 +956,7 @@ header{padding-bottom:17px;border-bottom:1px solid var(--line)}.eyebrow{margin:0
 section{margin-top:18px}.section-title{margin:0 0 6px;font-size:14px;font-weight:680}.panel{border:1px solid var(--line);border-radius:8px;overflow:hidden}.row{display:grid;grid-template-columns:94px minmax(0,1fr);gap:11px;padding:8px 10px;border-bottom:1px solid var(--line)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{min-width:0;overflow-wrap:anywhere}.name{font-weight:650}.mono{font:12.25px/1.36 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
 .rule{padding:9px 0;border-top:1px solid var(--line)}.rule:first-child{border-top:0}.rulehead{display:flex;justify-content:space-between;gap:7px 10px;align-items:center}.filter{font-weight:650;line-height:1.22}.meta{display:flex;gap:4px;flex-wrap:wrap;justify-content:flex-end}.pill{padding:1px 5px;border:1px solid var(--line);border-radius:999px;color:var(--muted);font-size:10.25px;line-height:1.55;white-space:nowrap}.ruletext{margin-top:5px;padding:7px 9px;background:var(--code);border-radius:6px;font:12.25px/1.36 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
 .fallback{padding:8px 10px;border:1px solid var(--line);border-radius:8px}details{margin-top:16px;border-top:1px solid var(--line);padding-top:8px}summary{color:var(--muted);cursor:pointer;font-size:12px}.technical{margin-top:5px;color:var(--muted);font-size:11px;line-height:1.3;display:grid;gap:2px}.technical div{margin:0;overflow-wrap:anywhere}.technical .mono{font-size:10.75px}.note{margin-top:10px;color:var(--muted);font-size:11px}.status{min-height:68vh;display:grid;align-content:center}.status header{border-bottom:0}
+.unblock-actions{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px}.unblock-actions button{border:1px solid var(--line);border-radius:8px;background:var(--text);color:var(--bg);padding:8px 14px;font-size:13px;font-weight:600;cursor:pointer}.unblock-actions button:disabled{opacity:.65;cursor:wait}.unblock-actions button[hidden]{display:none}.unblock-footnote,.unblock-feedback{margin:8px 0 0;color:var(--muted);font-size:12px}.unblock-feedback[data-state=success]{color:var(--text)}.unblock-feedback[data-state=error]{font-weight:600}
 @media(max-width:520px){main{padding-left:12px;padding-right:12px;padding-top:max(21px,env(safe-area-inset-top))}.title{font-size:26.5px}.row{grid-template-columns:80px minmax(0,1fr);gap:8px;padding:7px 8px}.domain{font-size:14px}.mono,.ruletext{font-size:11.5px}.section-title{font-size:13.5px}}
 @media(max-width:340px){.row{grid-template-columns:1fr;gap:2px}.rulehead{display:block}.meta{justify-content:flex-start;margin-top:4px}}
 '''
@@ -984,7 +986,11 @@ def render_status(host):
     return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="{FAVICON_DATA_URI}"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=0913"><link rel="shortcut icon" href="/favicon.ico?v=0913"><link rel="apple-touch-icon" href="/favicon.png?v=0913"><meta name="theme-color" content="#b3261e"><title>Block page</title><style>{CSS}</style></head><body><main class="status"><header><h1 class="title">Block page</h1><p class="lead">The service is running and ready for AdGuard Home.</p><div class="domain">{esc(host)}</div></header></main></body></html>'''.encode()
 
 
-def render_blocked(host, device, details):
+def render_blocked(host, device, details, client_ip, is_open=False):
+    controls = unblock_ui.render_controls(host, client_ip, is_open)
+    page_title = 'Unblocked' if is_open else 'Blocked'
+    page_lead = ('AdGuard allows this address. Your device may still have an old DNS result.' if is_open
+                 else 'Your network prevented this destination from loading.')
     full_name = str(device.get("name") or "").strip().rstrip(".")
     short_name = display_device_name(full_name)
     ipv4 = [a for a in device.get("addresses", []) if ":" not in a]
@@ -1061,10 +1067,17 @@ def render_blocked(host, device, details):
     technical_html = f'<details><summary>Technical details</summary><div class="technical">{"".join(technical)}</div></details>'
     note = "" if details["api_ok"] or details.get("stale") else '<p class="note">AdGuard is answering DNS, but its filtering API did not return details for this request.</p>'
 
-    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="{FAVICON_DATA_URI}"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=0913"><link rel="shortcut icon" href="/favicon.ico?v=0913"><link rel="apple-touch-icon" href="/favicon.png?v=0913"><meta name="theme-color" content="#b3261e"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">Blocked</h1><p class="lead">Your network prevented this destination from loading.</p><div class="domain">{esc(host)}</div></header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
+    return f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="color-scheme" content="light dark"><link rel="icon" type="image/png" sizes="64x64" href="{FAVICON_DATA_URI}"><link rel="icon" type="image/png" sizes="64x64" href="/favicon.png?v=0913"><link rel="shortcut icon" href="/favicon.ico?v=0913"><link rel="apple-touch-icon" href="/favicon.png?v=0913"><meta name="theme-color" content="#b3261e"><title>Blocked — {esc(host)}</title><style>{CSS}</style></head><body><main><header><p class="eyebrow">DNS filtering</p><h1 class="title">{page_title}</h1><p class="lead">{page_lead}</p><div class="domain">{esc(host)}</div>{controls}</header>{device_html}{blocked_html}{dns_html}{technical_html}{note}</main></body></html>'''.encode()
 
 
 class Handler(BaseHTTPRequestHandler):
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(10)
+
+    def do_POST(self):
+        unblock_ui.process_post(self)
+
     def request_host(self):
         value = (self.headers.get("Host") or "").strip()
         if value.startswith("[") and "]" in value:
@@ -1080,7 +1093,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Expires", "0")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
-        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'none'; img-src 'self' data:; connect-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")
+        self.send_header("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
         self.send_header("Connection", "close")
         self.end_headers()
         self.close_connection = True
@@ -1132,7 +1145,8 @@ class Handler(BaseHTTPRequestHandler):
         client_ip = normalize_ip(self.client_address[0])
         print(f"{client_ip} - BEGIN GET {host or self.path}", flush=True)
         if host and not is_ip(host):
-            body = render_blocked(host, device_info(client_ip), block_details(host, client_ip))
+            is_open = unblock_ui.is_currently_open(host, client_ip)
+            body = render_blocked(host, device_info(client_ip), block_details(host, client_ip), client_ip, is_open)
         else:
             body = render_status(host or "block page")
         self.reply(200, body, "text/html; charset=utf-8")
