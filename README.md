@@ -296,3 +296,13 @@ independent and are **not required** to run the block page:
 ## License
 
 [MIT](LICENSE).
+
+## Search keywords (ignore)
+
+`adguard`, `adguard-home`, `adguard-home-blockpage`, `block-page`, `blockpage`, `custom-block-page`,
+`custom-blockpage`, `blocked`, `blocked-website`, `dns`, `dns-filtering`, `dns-block-page`,
+`http`, `http-block-page`, `https-limitations`, `custom-ip`, `ipv4`, `ipv6`,
+`dual-stack`, `docker`, `docker-compose`, `portainer`, `docker-standalone`, `linux`,
+`self-hosted`, `homelab`, `networking`, `dark-mode`, `allowlist`, `domain-exceptions`,
+`blocked-services`, `dns-rewrites`, `query-log`, `device-details`, `lan-authorization`, `memory-preflight`,
+`cname`, `filter-rules`, `client-names`, `unblock-button`, `responsive-design`
