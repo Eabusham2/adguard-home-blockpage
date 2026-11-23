@@ -1,0 +1,125 @@
+name: Release block page
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag (vMAJOR.MINOR.PATCH)
+        required: true
+        type: string
+      expected_sha:
+        description: Full commit SHA that the tag must resolve to
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blockpage-release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.verify.outputs.tag }}
+      sha: ${{ steps.verify.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: verify
+        name: Verify release tag, commit, and application version
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          EXPECTED_SHA: ${{ inputs.expected_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          actual=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          test "$actual" = "$EXPECTED_SHA"
+          git merge-base --is-ancestor "$actual" origin/main
+          git checkout --detach "$actual"
+          python - <<'PY'
+          import ast
+          import os
+          from pathlib import Path
+          tree = ast.parse(Path("app.py").read_text())
+          version = next(ast.literal_eval(node.value) for node in tree.body
+                         if isinstance(node, ast.Assign)
+                         and any(isinstance(target, ast.Name) and target.id == "APP_VERSION"
+                                 for target in node.targets))
+          assert os.environ["RELEASE_TAG"] == f"v{version}", "Tag/version mismatch"
+          PY
+          printf 'tag=%s\nsha=%s\n' "$RELEASE_TAG" "$actual" >> "$GITHUB_OUTPUT"
+
+  validate:
+    needs: resolve
+    uses: ./.github/workflows/validate.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
+  publish:
+    needs: [resolve, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          fetch-depth: 0
+      - name: Build checksummed source bundle
+        env:
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RELEASE_SHA"
+          mkdir -p dist
+          git archive --format=tar --prefix="adguard-home-blockpage-$RELEASE_TAG/" "$RELEASE_SHA" \
+            | gzip -n > "dist/adguard-home-blockpage-$RELEASE_TAG.tar.gz"
+          cd dist
+          sha256sum "adguard-home-blockpage-$RELEASE_TAG.tar.gz" > SHA256SUMS
+          sha256sum -c SHA256SUMS
+      - name: Publish verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ needs.resolve.outputs.tag }}
+          RELEASE_SHA: ${{ needs.resolve.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo 'Release already exists; preserving its published assets.' >&2
+            exit 1
+          fi
+          python - <<'PY'
+          import os
+          from pathlib import Path
+          tag, sha = os.environ["RELEASE_TAG"], os.environ["RELEASE_SHA"]
+          Path("/tmp/release-notes.md").write_text(
+              f"AdGuard Home Block Page {tag}\n\n"
+              f"Source commit: `{sha}`.\n\n"
+              "Public Docker Compose and Portainer installation instructions, configurable "
+              "deployment values, and a checksummed source bundle. The Portainer stack "
+              "pins the same four Python modules as this release.\n\n"
+              "Validation: Python syntax, pinned-module equality, unblock authorization/token "
+              "smoke checks, missing-memory-data rejection, IPv4/IPv6 HTTP checks, both "
+              "Compose configurations, and a Docker image build/HTTP smoke test. These "
+              "checks do not replace testing on your host.\n\n"
+              "Extract the source bundle and follow README.md. Set every required deployment "
+              "variable; example addresses are placeholders. SHA256SUMS verifies the bundle.\n"
+          )
+          PY
+          gh release create "$RELEASE_TAG" \
+            "dist/adguard-home-blockpage-$RELEASE_TAG.tar.gz" dist/SHA256SUMS \
+            --verify-tag --target "$RELEASE_SHA" --title "AdGuard Home Block Page $RELEASE_TAG" \
+            --notes-file /tmp/release-notes.md

@@ -2,52 +2,110 @@ name: Validate block page
 
 on:
   push:
+    branches: ['**']
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Commit to validate for a release
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: blockpage-validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' && github.ref_type != 'tag' }}
 
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-      - name: Validate merged Portainer Compose file
+      - name: Validate Python and local HTTP behavior
+        run: python scripts/validate.py
+      - name: Validate both Compose deployments with public configuration
         env:
-          AGH_URL: http://192.168.50.133:3000
+          AGH_URL: http://192.0.2.10:3000
           AGH_USERNAME: ci-example
           AGH_PASSWORD: ci-example
+          AGH_CONTAINER: example-adguard
+          AGH_DNS_SERVER: 192.0.2.10
+          FALLBACK_DNS_SERVER: 1.1.1.1
+          UNBLOCK_ALLOWED_NETWORKS: 192.0.2.20/32,127.0.0.0/8,::1/128
         run: |
-          docker compose -f portainer-stack.yml config --quiet
-          docker compose -f portainer-stack.yml config --format json > /tmp/adguard-portainer-config.json
+          set -euo pipefail
+          for configuration in docker-compose.yml portainer-stack.yml; do
+            docker compose -f "$configuration" config --quiet
+            docker compose -f "$configuration" config --format json > "/tmp/$configuration.json"
+          done
           python - <<'PY'
           import json
-          data = json.load(open("/tmp/adguard-portainer-config.json"))
-          assert set(data["services"]) == {"blockpage"}
-          block = data["services"]["blockpage"]
-          assert block["image"] == "python:3.13-alpine"
-          assert block["pull_policy"] == "never"
-          assert block["network_mode"] == "host"
-          assert block["dns"] == ["192.168.50.133", "1.1.1.1"]
-          assert block["read_only"] is True
-          command = block["command"][-1]
-          assert "8cbc283a840065d04f671aa86bf8d0fb84aa467b" in command
-          for filename in ("app.py", "unblock.py", "memory_guard.py", "unblock_ui.py"):
-              assert filename in command
-          print("Portainer Compose configuration valid")
+          import os
+          for filename in ("docker-compose.yml", "portainer-stack.yml"):
+              with open(f"/tmp/{filename}.json") as stream:
+                  data = json.load(stream)
+              assert set(data["services"]) == {"blockpage"}
+              block = data["services"]["blockpage"]
+              assert block["network_mode"] == "host"
+              assert block["read_only"] is True
+              assert block["cgroup"] == "host"
+              assert block["environment"]["UNBLOCK_ALLOWED_NETWORKS"] == os.environ["UNBLOCK_ALLOWED_NETWORKS"]
+              assert block["environment"]["AGH_URL"] == os.environ["AGH_URL"]
+              mounts = {entry["target"]: entry for entry in block["volumes"]}
+              assert mounts["/host-proc"]["read_only"] is True
+              assert mounts["/host-cgroup"]["read_only"] is True
+              assert mounts["/state"]["type"] == "volume"
+              if filename == "portainer-stack.yml":
+                  assert block["image"] == "python:3.13-alpine"
+                  assert block["pull_policy"] in ("missing", "if_not_present")
+                  assert block["dns"] == [os.environ["AGH_DNS_SERVER"], os.environ["FALLBACK_DNS_SERVER"]]
+                  assert block["volumes_from"] == ["container:example-adguard:ro"]
+                  command = block["command"][-1]
+                  assert "644448aebda5eff86827ffc46440a8a90e541e84" in command
+                  for module in ("app.py", "unblock.py", "memory_guard.py", "unblock_ui.py"):
+                      assert module in command
+          print("Both Compose configurations valid")
           PY
-      - name: Compile modules and smoke-test unblock controls
-        run: |
-          python -m py_compile app.py unblock.py unblock_ui.py memory_guard.py
+          AGH_DNS_SERVER=198.51.100.10 AGH_CONTAINER=another-adguard \
+            UNBLOCK_ALLOWED_NETWORKS=198.51.100.20/32 \
+            docker compose -f portainer-stack.yml config --format json > /tmp/alternate.json
           python - <<'PY'
-          import unblock_ui
-          from unblock import normalize_host
-          assert normalize_host("Example.COM") == "example.com"
-          assert not unblock_ui.client_may_unblock("8.8.8.8")
-          assert unblock_ui.client_may_unblock("192.168.50.42")
-          markup = unblock_ui.render_controls("example.com", "192.168.50.42")
-          assert 'id="unblock"' in markup and 'data-token="' in markup
-          assert "Refresh page" in unblock_ui.render_controls("example.com", "192.168.50.42", True)
-          assert not unblock_ui.valid_token("bogus", "example.com", "192.168.50.42")
-          print("Unblock UI smoke tests passed")
+          import json
+          with open("/tmp/alternate.json") as stream:
+              block = json.load(stream)["services"]["blockpage"]
+          assert block["dns"][0] == "198.51.100.10"
+          assert block["volumes_from"] == ["container:another-adguard:ro"]
+          assert block["environment"]["UNBLOCK_ALLOWED_NETWORKS"] == "198.51.100.20/32"
+          print("Alternate network/container configuration valid")
           PY
+          if env -u UNBLOCK_ALLOWED_NETWORKS docker compose -f docker-compose.yml config --quiet 2>/dev/null; then
+            echo 'Missing administrator networks must be rejected' >&2
+            exit 1
+          fi
+      - name: Build and smoke-test the packaged container
+        run: |
+          set -euo pipefail
+          docker build --tag blockpage-ci .
+          trap 'docker rm --force blockpage-ci >/dev/null 2>&1 || true' EXIT
+          docker run --detach --name blockpage-ci --read-only --tmpfs /tmp:size=16m \
+            --cap-drop ALL --pids-limit 32 --memory 128m \
+            --publish 127.0.0.1:18080:8080 --env PORT=8080 blockpage-ci
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:18080/healthz > /tmp/container-health.json; then
+              python -c 'import json; assert json.load(open("/tmp/container-health.json")) == {"ok": True}'
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs blockpage-ci
+          exit 1

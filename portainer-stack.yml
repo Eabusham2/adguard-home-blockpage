@@ -1,28 +1,28 @@
 services:
   blockpage:
     image: python:3.13-alpine
-    pull_policy: never
+    pull_policy: missing
     container_name: adguard-home-blockpage
     restart: unless-stopped
     network_mode: host
 
-    # Keep the old DNS fallback for downloading code during AdGuard outages.
+    # Configure the LAN resolver; keep a fallback for an AdGuard outage.
     dns:
-      - 192.168.50.133
-      - 1.1.1.1
+      - "${AGH_DNS_SERVER:?Set AGH_DNS_SERVER to a reachable DNS server}"
+      - "${FALLBACK_DNS_SERVER:-1.1.1.1}"
 
     # Read AdGuard's existing query logs and configuration, without modifying them.
     volumes_from:
-      - "container:adguard-asus:ro"
+      - "container:${AGH_CONTAINER:?Set AGH_CONTAINER to your existing AdGuard container name}:ro"
 
-    # Pin the verified v0.9.15 source; retry all four downloads if GitHub/DNS fails.
+    # Pin v0.9.16 modules; retry all four downloads if GitHub/DNS fails.
     # Only this block-page container is changed; AdGuard is never restarted.
     command:
       - sh
       - -ec
       - |
         echo "Starting AdGuard block page..."
-        SRC=https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/8cbc283a840065d04f671aa86bf8d0fb84aa467b
+        SRC=https://raw.githubusercontent.com/Eabusham2/adguard-home-blockpage/644448aebda5eff86827ffc46440a8a90e541e84
         until wget -q -T 15 -O /tmp/app.py "$$SRC/app.py" \
           && wget -q -T 15 -O /tmp/unblock.py "$$SRC/unblock.py" \
           && wget -q -T 15 -O /tmp/memory_guard.py "$$SRC/memory_guard.py" \
@@ -31,16 +31,16 @@ services:
           sleep 5
         done
         python -m py_compile /tmp/app.py /tmp/unblock.py /tmp/memory_guard.py /tmp/unblock_ui.py
-        echo "Downloaded and verified v0.9.15 - starting..."
+        echo "Downloaded and syntax-checked v0.9.16 - starting..."
         exec python -u /tmp/app.py
 
     environment:
-      AGH_URL: "${AGH_URL}"
-      AGH_USERNAME: "${AGH_USERNAME}"
-      AGH_PASSWORD: "${AGH_PASSWORD}"
-      AGH_QUERYLOG_FILE: "/opt/adguardhome/work/data/querylog.json"
-      AGH_CONFIG_FILE: "/opt/adguardhome/conf/AdGuardHome.yaml"
-      UNBLOCK_ALLOWED_NETWORKS: "${UNBLOCK_ALLOWED_NETWORKS:-192.168.50.0/24,127.0.0.0/8,::1/128,fc00::/7,fe80::/10}"
+      AGH_URL: "${AGH_URL:?Set AGH_URL to your AdGuard API base URL}"
+      AGH_USERNAME: "${AGH_USERNAME:-}"
+      AGH_PASSWORD: "${AGH_PASSWORD:-}"
+      AGH_QUERYLOG_FILE: "${AGH_QUERYLOG_FILE:-/opt/adguardhome/work/data/querylog.json}"
+      AGH_CONFIG_FILE: "${AGH_CONFIG_FILE:-/opt/adguardhome/conf/AdGuardHome.yaml}"
+      UNBLOCK_ALLOWED_NETWORKS: "${UNBLOCK_ALLOWED_NETWORKS:?Set UNBLOCK_ALLOWED_NETWORKS to trusted administrator addresses or networks}"
       UNBLOCK_STATE_DIR: "/state"
       PORT: "80"
 
