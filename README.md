@@ -1,12 +1,20 @@
 # AdGuard Home Block Page
 
-A self-hosted HTTP explanation page for domains blocked by AdGuard Home. It
-shows the requesting device, filtering rules, and DNS details, with a LAN
-**Unblock** action for permitted clients. Run it on a Linux Docker host; no
-particular router brand is required.
+An open-source custom HTTP block page for AdGuard Home. Explain why a
+DNS-blocked website was blocked, display available device and filtering
+details, and let permitted LAN clients request an allowlist exception.
+Self-host it on Linux with Docker Compose or Portainer; no particular router
+brand is required.
 
 [Download a release](https://github.com/Eabusham2/adguard-home-blockpage/releases)
 · [Report a problem](https://github.com/Eabusham2/adguard-home-blockpage/issues)
+
+[Docker Compose setup](#quick-start-with-docker-compose)
+· [Portainer setup](#portainer-installation)
+· [FAQ](#frequently-asked-questions)
+· [Troubleshooting](#troubleshooting)
+· [Support](#support)
+· [Development](#development-and-releases)
 
 ## What it does
 
@@ -185,6 +193,50 @@ This retains the state volume and does not remove AdGuard allowlist rules.
 Before permanently removing the service, change AdGuard's Custom IP blocking
 setting so blocked DNS answers no longer point at a stopped web server.
 
+## Frequently asked questions
+
+### How do I add a custom block page to AdGuard Home?
+
+Run the service on an available port 80, then set AdGuard's **Custom IP**
+blocking responses to the block-page host's reachable IPv4/IPv6 addresses.
+Clients must use that AdGuard instance for DNS. Start with
+[Docker Compose](#quick-start-with-docker-compose) or
+[Portainer](#portainer-installation), then [configure AdGuard](#configure-adguard-home).
+
+### Why does a blocked HTTPS website show an error instead of the page?
+
+This service does not intercept TLS. HTTPS-only sites, HSTS, and HTTPS-first
+browser behavior can prevent an HTTP replacement page from appearing. Test
+with an explicit `http://` URL; see [requirements and limits](#requirements-and-limits).
+
+### Do I need an ASUS router, and which setups are supported?
+
+No particular router brand is required. The documented setup uses Linux Docker
+Engine with modern Docker Compose, or Portainer on Docker Standalone, with
+IPv6 socket support. The Unblock action additionally requires AdGuard on the
+same host; see the [deployment requirements](#requirements-and-limits).
+
+### Does Unblock allow a website for only my device?
+
+It allows the hostname and its subdomains for **all clients** using AdGuard.
+Authorization also includes detected global IPv6 on-link networks, which
+`UNBLOCK_ALLOWED_NETWORKS` alone does not exclude. Review
+[Unblock permissions](#unblock-permissions-and-persistence) before enabling access.
+
+### Why is Unblock declined or still pending?
+
+Insufficient verified memory headroom, unavailable host data, a cooldown, or an
+earlier unconfirmed write can prevent another update. The app does not
+automatically repeat uncertain writes or restart AdGuard. See
+[persistence and recovery](#unblock-permissions-and-persistence) and
+[troubleshooting](#troubleshooting).
+
+### Does the page list every blocklist containing the domain?
+
+It shows AdGuard's applied rules, matching custom rules, and available local
+query-log evidence. It does not scan every subscribed list. See
+[rule-reporting limits](#requirements-and-limits).
+
 ## Troubleshooting
 
 | Symptom | Check |
@@ -197,14 +249,22 @@ setting so blocked DNS answers no longer point at a stopped web server.
 | Missing device/rule details | Check API URL/credentials and optional file mounts. MAC/neighbor information is not always available. |
 | Unblock is declined | Check authorization, same-host API address, host mounts, readable process/cgroup data, available RAM, and pending state. |
 
-When reporting a problem, include the selected release, application version,
-deployment type, relevant redacted logs, and whether `/healthz` works. Remove
-passwords, client addresses/names, and private browsing data from reports.
+## Support
+
+[Open a GitHub issue](https://github.com/Eabusham2/adguard-home-blockpage/issues)
+with the selected release, application version, Linux/Docker/Compose or
+Portainer versions, deployment file used, and steps to reproduce the problem.
+Include relevant redacted logs, whether the URL uses HTTP or HTTPS, and whether
+`/healthz` works. A healthy listener alone does not verify AdGuard credentials
+or DNS filtering. Remove passwords, client addresses/names, and private browsing
+data before sharing logs or configuration.
 
 ## Development and releases
 
-The application uses Python's standard library. Run the same non-destructive
-checks as CI with Python 3.13:
+The application uses Python's standard library. Contributor and coding-agent
+guidance is in [AGENTS.md](AGENTS.md), including the module map, isolated checks,
+and immutable Portainer source-pin rules. Run the same non-destructive checks
+as CI with Python 3.13:
 
 ```sh
 python scripts/validate.py
@@ -220,6 +280,18 @@ commit SHA; it rejects a mismatch.
 
 To verify a downloaded bundle on Linux, put it beside `SHA256SUMS` and run
 `sha256sum -c SHA256SUMS` (on macOS: `shasum -a 256 -c SHA256SUMS`).
+
+## Related projects
+
+[AdGuard Home](https://github.com/AdguardTeam/AdGuardHome) is the DNS filtering
+service this block page connects to. These other router projects are
+independent and are **not required** to run the block page:
+
+| Project | Purpose |
+| --- | --- |
+| [Router VPN](https://github.com/Eabusham2/router-vpn) | Self-hosted VPN/proxy platform with native clients; consult its current release and platform status. |
+| [FlowCache Doctor](https://github.com/Eabusham2/asuswrt-merlin-flowcache-doctor) | Router diagnostics and targeted FlowCache recovery for the documented ASUS GT-BE19000AI / Asuswrt-Merlin setup. |
+| [Asuswrt DynBQ v3](https://github.com/Eabusham2/asuswrt-dynbq-v3) | Experimental, firmware-specific Broadcom queue-control source for developers and validated installations. |
 
 ## License
 
